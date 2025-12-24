@@ -1,0 +1,1483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HR Master - Enterprise Edition</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Shared Logic (تم إضافة منطق الحسابات هنا) -->
+    <script>
+        window.HRUtils = {
+            // حساب دقائق التأخير
+            calculateLateness: (timestampSeconds, shiftStart = "09:00", settings = {}) => {
+                if (!timestampSeconds) return 0;
+                const date = new Date(timestampSeconds * 1000);
+                const [startHour, startMin] = shiftStart.split(':').map(Number);
+                const shiftDate = new Date(date);
+                shiftDate.setHours(startHour, startMin, 0, 0);
+                
+                // فترة سماح (افتراضي 15 دقيقة)
+                const grace = Number(settings.gracePeriod) || 15;
+                shiftDate.setMinutes(shiftDate.getMinutes() + grace);
+
+                if (date > shiftDate) {
+                    const diffMs = date - shiftDate;
+                    return Math.floor(diffMs / 60000);
+                }
+                return 0;
+            },
+
+            // حساب الراتب والخصومات والصافي بناء على شهر محدد
+            calculateFinancials: (employee, logs = [], deductions = [], settings = {}) => {
+                const baseSalary = Number(employee.salary) || 0;
+                const housing = Number(employee.housingAllowance) || 0;
+                const transport = Number(employee.transportAllowance) || 0;
+                const other = Number(employee.otherAllowance) || 0;
+                const totalIncome = baseSalary + housing + transport + other;
+                const workHours = Number(settings.workHours) || 8;
+
+                // تكلفة الدقيقة: الراتب / 30 يوم / ساعات العمل / 60 دقيقة
+                const minuteCost = baseSalary > 0 ? (baseSalary / 30 / workHours / 60) : 0;
+
+                // حساب إجمالي دقائق التأخير في السجلات الممررة (للفترة المحددة)
+                let totalLateness = 0;
+                logs.forEach(log => {
+                    if (log.type === 'in') {
+                        totalLateness += window.HRUtils.calculateLateness(log.timestamp?.seconds, employee.shiftStart, settings);
+                    }
+                });
+
+                // تطبيق قواعد التأخير
+                let lateCost = 0;
+                if (settings.latenessRule === 'allowance60') {
+                    // خصم ما زاد عن 60 دقيقة فقط
+                    const chargeable = Math.max(0, totalLateness - 60);
+                    lateCost = Math.floor(chargeable * minuteCost);
+                } else if (settings.latenessRule === 'grace30') {
+                     // grace handled in calculateLateness, so just cost here
+                     lateCost = Math.floor(totalLateness * minuteCost);
+                } else {
+                    // Default 'salary' or 'hours8' (handled by minuteCost calc)
+                    lateCost = Math.floor(totalLateness * minuteCost);
+                }
+
+                // حساب إجمالي الخصومات والسلف
+                const totalDeductions = deductions.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
+
+                const netSalary = totalIncome - totalDeductions - lateCost;
+
+                return {
+                    totalLateness,
+                    lateCost,
+                    totalDeductions,
+                    netSalary: netSalary > 0 ? netSalary : 0,
+                    minuteCost
+                };
+            }
+        };
+    </script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        slate: { 850: '#1e293b', 900: '#0f172a' },
+                        primary: { 50: '#eef2ff', 100: '#e0e7ff', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
+                    },
+                    fontFamily: { sans: ['Inter', 'Cairo', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, query, where, onSnapshot, orderBy, serverTimestamp, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        
+        // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+        const firebaseConfig = {
+            apiKey: "AIzaSyDo_J0Bh_Zej_MiIH0MutQZYbPtr1pg3zk",
+            authDomain: "hr-1-fae9c.firebaseapp.com",
+            projectId: "hr-1-fae9c",
+            storageBucket: "hr-1-fae9c.firebasestorage.app",
+            messagingSenderId: "996026058850",
+            appId: "1:996026058850:web:bfde7cd63f4bfadf5ea93b",
+            measurementId: "G-7ZMVL7S95X"
+        };
+
+        try {
+            const app = initializeApp(firebaseConfig);
+            window.auth = getAuth(app);
+            window.db = getFirestore(app);
+            window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+            window.createUserWithEmailAndPassword = createUserWithEmailAndPassword;
+            window.signOut = signOut;
+            window.onAuthStateChanged = onAuthStateChanged;
+            window.setPersistence = setPersistence;
+            window.browserLocalPersistence = browserLocalPersistence;
+            window.browserSessionPersistence = browserSessionPersistence;
+            window.collection = collection;
+            window.doc = doc;
+            window.setDoc = setDoc;
+            window.getDoc = getDoc;
+            window.getDocs = getDocs;
+            window.addDoc = addDoc;
+            window.updateDoc = updateDoc;
+            window.deleteDoc = deleteDoc;
+            window.query = query;
+            window.where = where;
+            window.onSnapshot = onSnapshot;
+            window.orderBy = orderBy;
+            window.serverTimestamp = serverTimestamp;
+            window.firebaseLoaded = true;
+        } catch (e) {
+            window.firebaseLoaded = false;
+        }
+    </script>
+
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+        .font-arabic { font-family: 'Cairo', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* تحسينات الطباعة لإخفاء القوائم وإظهار التقرير كاملاً */
+        @media print {
+            @page { size: A4; margin: 10mm; }
+            body { background: white; font-size: 11pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .no-print, nav, header, button:not(.print-allow), .sidebar { display: none !important; }
+            .print-only { display: block !important; }
+            .print-container { position: relative; width: 100%; box-shadow: none; border: none; margin: 0; padding: 0; overflow: visible !important; }
+            .card-shadow { box-shadow: none !important; border: 1px solid #ddd; }
+            #root { height: auto; overflow: visible; }
+            .print-break-inside { break-inside: avoid; }
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased h-dvh overflow-hidden">
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+        const DEFAULT_SHIFT_START = "09:00";
+        const COMPANY_LOGO = "https://placehold.co/400x100?text=Company+Logo"; // ضع رابط صورة الشعار هنا
+
+        const TRANSLATIONS = {
+            en: {
+                appName: "HR Master", dashboard: "Dashboard", attendance: "Attendance", employees: "Staff Directory", reports: "Analytics", requests: "Requests", chat: "Team Connect", meetings: "Meetings",
+                login: "Sign In", register: "Join Company", email: "Username", password: "Password", fullName: "Full Name", department: "Department", role: "Job Title", salary: "Base Salary",
+                welcome: "Welcome back,", checkIn: "Punch In", checkOut: "Punch Out", status: "Status", online: "Online", onsite: "On-Site", create: "Create", cancel: "Cancel", submit: "Submit",
+                gpsRequired: "GPS Location Required", accessDenied: "Restricted Access", addEmployee: "Add Employee", save: "Save Changes", loginError: "Invalid credentials.", rememberMe: "Remember Me",
+                noAccount: "New here? Create an account.", haveAccount: "Have an account? Sign in.", roles: { hr: "HR Manager", manager: "Manager", employee: "Employee", owner: "Owner" },
+                edit: "Edit", delete: "Delete", confirmDelete: "Are you sure? This action is irreversible.", actions: "Actions", printReport: "Print Full Profile", reportType: "Report Type",
+                allDepts: "All Departments", filterByDept: "Filter Department", employeeReport: "Employee Profile", attendanceReport: "Attendance Log",
+                totalEmployees: "Total Staff", totalSalary: "Est. Payroll", generatedOn: "Generated:", myRequests: "My Requests", manageRequests: "Approvals", newRequest: "New Request",
+                type: "Type", reason: "Description", pending: "Pending", approved: "Approved", rejected: "Rejected", approve: "Approve", reject: "Reject",
+                loan: "Loan", leave: "Leave", permission: "Exit Permit", travel: "Travel Permit", otherRequest: "Other Request", overtime: "Overtime", reqSuccess: "Request Sent Successfully",
+                scheduleMeeting: "Schedule Meeting", meetingTitle: "Subject", join: "Join", accountPending: "Account Under Review",
+                pendingMessage: "Your account is currently pending HR approval.", joinRequests: "Join Requests", activeEmployees: "Active Staff",
+                approveUser: "Approve", rejectUser: "Decline", viewProfile: "Full Profile", position: "Position", shiftStart: "Shift Start", shiftEnd: "Shift End",
+                netSalary: "Net Salary", deductions: "Deductions", custody: "Assets", lateness: "Late (min)", addCustody: "Add Asset", addDeduction: "Add Deduction",
+                itemName: "Item Name", amount: "Amount", date: "Date", from: "From", to: "To", cost: "Cost", pendingActions: "Pending Actions",
+                channels: "Channels", directMessages: "Direct Messages", generalChannel: "General", deptChannel: "My Dept",
+                passport: "Passport No.", passportExpiry: "Passport Expiry", residency: "Residency/ID", residencyExpiry: "ID Expiry",
+                nationality: "Nationality", religion: "Religion", phone: "Phone No.",
+                bankName: "Bank Name", iban: "IBAN / Account No.", joinDate: "Joining Date",
+                allowances: "Allowances", housingAllowance: "Housing", transportAllowance: "Transport",
+                tasks: "Tasks", assignTask: "Assign Task", taskTitle: "Task Title", taskDesc: "Description",
+                dueDate: "Due Date", assignedTo: "Assigned To", documents: "Documents",
+                expiryDate: "Expiry Date", upload: "Upload", download: "Download",
+                mission: "Mission", travel: "Travel", editProfile: "Edit Profile", bankChange: "Bank Change", complaint: "Complaint"
+            },
+            ar: {
+                appName: "الموارد البشرية", dashboard: "لوحة التحكم", attendance: "الحضور والانصراف", employees: "دليل الموظفين", reports: "التقارير والتحليلات", requests: "الطلبات والإجازات",
+                chat: "التواصل الداخلي", meetings: "الاجتماعات", login: "دخول النظام", register: "طلب انضمام", email: "اسم المستخدم", password: "كلمة المرور",
+                fullName: "الاسم الرباعي", department: "القسم / الإدارة", role: "المسمى الوظيفي", salary: "الراتب الأساسي", welcome: "أهلاً بك،",
+                checkIn: "تسجيل حضور", checkOut: "تسجيل انصراف", status: "الحالة", online: "متصل", onsite: "في المقر", create: "إنشاء", cancel: "إلغاء", submit: "إرسال الطلب", rememberMe: "تذكرني",
+                gpsRequired: "يجب تفعيل الـ GPS", accessDenied: "وصول مقيد للإدارة فقط", addEmployee: "موظف جديد", save: "حفظ البيانات", loginError: "بيانات خاطئة.",
+                noAccount: "موظف جديد؟ سجل هنا.", haveAccount: "لديك حساب؟ سجل دخولك.", roles: { hr: "مدير موارد بشرية", manager: "مدير قسم", employee: "موظف", owner: "المالك" },
+                edit: "تعديل", delete: "حذف", confirmDelete: "هل أنت متأكد؟ لا يمكن التراجع.", actions: "إجراءات", printReport: "طباعة الملف كاملاً", reportType: "نوع التقرير",
+                allDepts: "كل الأقسام", filterByDept: "فلتر القسم", employeeReport: "ملف الموظف", attendanceReport: "سجل الحضور", totalEmployees: "عدد الموظفين",
+                totalSalary: "إجمالي الرواتب", generatedOn: "تاريخ التقرير:", myRequests: "طلباتي", manageRequests: "الموافقات", newRequest: "طلب جديد",
+                type: "النوع", reason: "التفاصيل", pending: "قيد المراجعة", approved: "مقبول", rejected: "مرفوض", approve: "موافقة", reject: "رفض",
+                loan: "سلفة مالية", leave: "إجازة", permission: "إذن انصراف", travel: "إذن سفر", otherRequest: "طلب آخر", overtime: "عمل إضافي", reqSuccess: "تم إرسال الطلب بنجاح",
+                scheduleMeeting: "جدولة اجتماع", meetingTitle: "الموضوع", join: "انضمام", accountPending: "الحساب قيد المراجعة",
+                pendingMessage: "تم إنشاء حسابك بنجاح. يرجى انتظار موافقة قسم الموارد البشرية.", joinRequests: "طلبات الانضمام", activeEmployees: "الموظفين",
+                approveUser: "تفعيل", rejectUser: "رفض", viewProfile: "الملف الكامل", position: "المنصب", shiftStart: "بداية الشفت", shiftEnd: "نهاية الشفت",
+                netSalary: "صافي الراتب", deductions: "الخصومات والجزاءات", custody: "الُعهد", lateness: "تأخير (دقيقة)", addCustody: "إضافة عهدة",
+                addDeduction: "إضافة خصم", itemName: "اسم العهدة", amount: "المبلغ", date: "التاريخ", from: "من", to: "إلى", cost: "التكلفة", pendingActions: "مهام معلقة",
+                channels: "القنوات", directMessages: "رسائل مباشرة", generalChannel: "عام", deptChannel: "قسمي",
+                passport: "رقم الجواز", passportExpiry: "انتهاء الجواز", residency: "رقم الهوية/الإقامة", residencyExpiry: "انتهاء الهوية",
+                nationality: "الجنسية", religion: "الديانة", phone: "رقم الهاتف",
+                bankName: "اسم البنك", iban: "رقم الحساب / الآيبان", joinDate: "تاريخ التعيين",
+                allowances: "البدلات", housingAllowance: "بدل سكن", transportAllowance: "بدل انتقال",
+                tasks: "المهام", assignTask: "إسناد مهمة", taskTitle: "عنوان المهمة", taskDesc: "الوصف",
+                dueDate: "تاريخ الاستحقاق", assignedTo: "مسندة إلى", documents: "المستندات",
+                expiryDate: "تاريخ الانتهاء", upload: "رفع", download: "تحميل",
+                mission: "مهمة عمل", travel: "سفر", editProfile: "تعديل بيانات", bankChange: "تغيير بنك", complaint: "شكوى"
+            }
+        };
+
+        const Icon = ({ name, size = 20, className }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (window.lucide && ref.current && name) {
+                    ref.current.innerHTML = '';
+                    const safeSize = Number(size) || 20;
+                    const i = document.createElement('i');
+                    const safeName = name.replace(/[^a-z0-9-]/g, '');
+                    i.setAttribute('data-lucide', safeName);
+                    ref.current.appendChild(i);
+                    window.lucide.createIcons({ root: ref.current, nameAttr: 'data-lucide', attrs: { width: safeSize, height: safeSize, class: className } });
+                }
+            }, [name, size, className]);
+            return <span ref={ref} style={{ display: 'inline-flex' }}></span>;
+        };
+
+        const ToastContext = React.createContext();
+        const ToastProvider = ({ children }) => {
+            const [toasts, setToasts] = useState([]);
+            const addToast = (msg, type = 'info') => {
+                const id = Date.now(); setToasts(prev => [...prev, { id, msg, type }]);
+                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+            };
+            return (
+                <ToastContext.Provider value={addToast}>
+                    {children}
+                    <div className="fixed top-6 right-6 z-50 flex flex-col gap-3 pointer-events-none no-print">
+                        {toasts.map(t => (
+                            <div key={t.id} className={`pointer-events-auto min-w-[320px] p-4 rounded-xl shadow-xl border-l-4 flex items-center gap-3 bg-white animate-fade-in ${t.type === 'success' ? 'border-green-500 text-green-700' : t.type === 'error' ? 'border-red-500 text-red-700' : 'border-blue-500 text-blue-700'}`}>
+                                <Icon name={t.type === 'success' ? 'check-circle' : 'info'} size={20} /><span className="font-semibold text-sm">{t.msg}</span>
+                            </div>
+                        ))}
+                    </div>
+                </ToastContext.Provider>
+            );
+        };
+        const useToast = () => React.useContext(ToastContext);
+
+        // Global Delete Handler
+        const useGlobalDelete = (user) => {
+            const showToast = useToast();
+            return async (collectionName, id, description = "Item") => {
+                if (!['HR', 'Manager', 'Owner'].includes(user.role)) {
+                    showToast("Access Denied", "error");
+                    return false;
+                }
+                if (!confirm("Are you sure you want to delete this?")) return false;
+                try {
+                    await window.deleteDoc(window.doc(window.db, collectionName, id));
+                    showToast("Deleted Successfully", "success");
+                    return true;
+                } catch (e) {
+                    showToast("Delete Failed", "error");
+                    return false;
+                }
+            };
+        };
+
+        const PermissionHelpModal = ({ onClose }) => (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 no-print">
+                <div className="bg-white rounded-2xl max-w-2xl w-full p-8 shadow-2xl relative border border-slate-100">
+                    <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"><Icon name="x" /></button>
+                    <h3 className="text-xl font-bold text-red-600 mb-4">Database Permission Error</h3>
+                    <p className="mb-4 text-slate-600">Please contact the system administrator to verify your access rights or update database rules.</p>
+                    <button onClick={() => window.location.reload()} className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800">Reload Application</button>
+                </div>
+            </div>
+        );
+
+        const PendingScreen = ({ t, onLogout }) => (
+            <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+                <div className="bg-white p-10 rounded-3xl shadow-xl w-full max-w-lg text-center border border-slate-200">
+                    <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-6 text-amber-500 animate-pulse"><Icon name="clock" size={40} /></div>
+                    <h2 className="text-2xl font-bold text-slate-800 mb-3">{t.accountPending}</h2>
+                    <p className="text-slate-500 mb-8 leading-relaxed">{t.pendingMessage}</p>
+                    <button onClick={onLogout} className="px-8 py-3 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800 transition-colors flex items-center gap-2 mx-auto"><Icon name="log-out" size={18} /> Logout</button>
+                </div>
+            </div>
+        );
+
+        const AuthScreen = ({ t, onLogin, onError }) => {
+            const [isRegister, setIsRegister] = useState(false);
+            const [formData, setFormData] = useState({ email: '', password: '', name: '' });
+            const [rememberMe, setRememberMe] = useState(true);
+            const [loading, setLoading] = useState(false);
+            const showToast = useToast();
+
+            const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault(); setLoading(true);
+                
+                // Handle Username Logic
+                let inputName = formData.email.trim(); // Using email field for username
+                let password = formData.password;
+                let email = inputName;
+                let autoLoginRole = null;
+                let autoLoginName = "";
+
+                // 1. Check for Admin Shortcut
+                if (inputName.toLowerCase() === 'admin' && password === '123') {
+                    email = 'admin@hr-master.com';
+                    password = 'admin123';
+                    autoLoginRole = 'Owner';
+                    autoLoginName = "System Owner";
+                }
+                else if (inputName.toLowerCase() === 'hr' && password === '123') {
+                    email = 'hr@hr-master.com';
+                    password = 'hr123';
+                    autoLoginRole = 'HR';
+                    autoLoginName = "HR Manager";
+                }
+                else if ((inputName.toLowerCase() === 'employee' || inputName.toLowerCase() === 'user') && password === '123') {
+                    email = 'employee@hr-master.com';
+                    password = 'employee123';
+                    autoLoginRole = 'Employee';
+                    autoLoginName = "Demo Employee";
+                } 
+                // 2. Auto-append domain if simple username is entered
+                else if (!inputName.includes('@')) {
+                    // Remove spaces and special chars to ensure valid email format
+                    const safeUsername = inputName.replace(/[^a-zA-Z0-9._-]/g, '').toLowerCase();
+                    email = `${safeUsername}@hr-system.com`;
+                }
+
+                if (!window.firebaseLoaded) {
+                    showToast("System Unavailable: Firebase not loaded", "error");
+                    setLoading(false);
+                    return;
+                }
+                
+                try {
+                    if (window.setPersistence) {
+                        await window.setPersistence(window.auth, rememberMe ? window.browserLocalPersistence : window.browserSessionPersistence);
+                    }
+
+                    if (autoLoginRole) {
+                        // Try login, if user-not-found then create account automatically
+                        try { 
+                            await window.signInWithEmailAndPassword(window.auth, email, password); 
+                        } catch (e) {
+                            if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
+                                const cred = await window.createUserWithEmailAndPassword(window.auth, email, password);
+                                await window.setDoc(window.doc(window.db, "users", cred.user.uid), { uid: cred.user.uid, name: autoLoginName, email: email, role: autoLoginRole, department: autoLoginRole === 'HR' ? 'Human Resources' : 'General', salary: 5000, status: 'active', createdAt: window.serverTimestamp() });
+                            } else {
+                                throw e;
+                            }
+                        }
+                    } else if (isRegister) {
+                        const cred = await window.createUserWithEmailAndPassword(window.auth, email, password);
+                        try { await window.setDoc(window.doc(window.db, "users", cred.user.uid), { uid: cred.user.uid, name: formData.name, email: email, role: 'Employee', department: 'General', salary: 0, status: 'pending', createdAt: window.serverTimestamp() }); } 
+                        catch(e) { if(e.code === 'permission-denied') onError(); }
+                    } else { await window.signInWithEmailAndPassword(window.auth, email, password); }
+                } catch (err) { 
+                    console.error("Login Error:", err);
+                    if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') showToast("Invalid Username or Password", "error");
+                    else if (err.code === 'auth/user-not-found') showToast("User not found", "error");
+                    else if (err.code === 'auth/email-already-in-use') showToast("Username already exists", "error");
+                    else if (err.code === 'auth/invalid-email') showToast("Invalid Username format", "error");
+                    else if (err.code === 'auth/network-request-failed') showToast("Network Error. Check Internet.", "error");
+                    else if (err.code === 'auth/configuration-not-found' || err.code === 'auth/operation-not-allowed') showToast("Setup Error: Enable Email/Password in Firebase Console", "error");
+                    else showToast(`Error: ${err.message}`, "error"); 
+                } finally { setLoading(false); }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+                    <div className="bg-white p-8 md:p-12 rounded-3xl shadow-2xl w-full max-w-md border border-slate-100">
+                        <div className="flex justify-center mb-8">
+                            {COMPANY_LOGO ? 
+                                <img src={COMPANY_LOGO} alt="Logo" className="h-16 object-contain" /> : 
+                                <div className="w-16 h-16 bg-primary-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-primary-200"><Icon name="hexagon" size={32} /></div>
+                            }
+                        </div>
+                        <h2 className="text-3xl font-bold text-center mb-2 text-slate-900">{isRegister ? t.register : t.login}</h2>
+                        <form onSubmit={handleSubmit} className="space-y-5">
+                            {isRegister && (<div><label className="text-xs font-bold text-slate-500 uppercase">{t.fullName}</label><input type="text" required className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-primary-500 outline-none mt-1" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div>)}
+                            <div><label className="text-xs font-bold text-slate-500 uppercase">{t.email}</label><input type="text" required className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-primary-500 outline-none mt-1" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} /></div>
+                            <div><label className="text-xs font-bold text-slate-500 uppercase">{t.password}</label><input type="password" required className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-primary-500 outline-none mt-1" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} /></div>
+                            {!isRegister && (<div className="flex items-center gap-2"><input type="checkbox" id="remember" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 border-gray-300" /><label htmlFor="remember" className="text-sm text-slate-600 font-medium cursor-pointer select-none">{t.rememberMe}</label></div>)}
+                            <button type="submit" disabled={loading} className="w-full py-3.5 bg-primary-600 text-white rounded-xl font-bold hover:bg-primary-700 transition-all shadow-lg shadow-primary-200 disabled:opacity-70 flex justify-center">{loading ? "..." : (isRegister ? t.create : t.login)}</button>
+                        </form>
+                        <div className="mt-6 text-center"><button onClick={() => setIsRegister(!isRegister)} className="text-sm font-medium text-primary-600 hover:text-primary-800">{isRegister ? t.haveAccount : t.noAccount}</button></div>
+                    </div>
+                </div>
+            );
+        };
+
+        const EmployeeProfile = ({ t, employee, onBack, isHR, onError, onEdit }) => {
+            const [logs, setLogs] = useState([]);
+            const [custodyList, setCustodyList] = useState([]);
+            const [deductionsList, setDeductionsList] = useState([]);
+            const [documents, setDocuments] = useState([]);
+            const [activeTab, setActiveTab] = useState('profile');
+            // FIX: Added Date Filter State
+            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+
+            const [newItem, setNewItem] = useState({ name: '', date: new Date().toISOString().split('T')[0] });
+            const [newDeduction, setNewDeduction] = useState({ amount: '', reason: '', date: new Date().toISOString().split('T')[0] });
+            const [newDoc, setNewDoc] = useState({ title: '', expiry: '' });
+
+            // FIX: Calculation based on Filtered Data
+            const { totalLateness, totalDeductions, lateCost, netSalary } = useMemo(() => {
+                if (!window.HRUtils) return { totalLateness:0, totalDeductions:0, lateCost:0, netSalary:0 };
+                
+                // Filter logs by selected month
+                const filteredLogs = logs.filter(l => {
+                    const d = new Date(l.timestamp?.seconds * 1000);
+                    return d.toISOString().startsWith(selectedMonth);
+                });
+
+                // Filter deductions by selected month
+                const filteredDeductions = deductionsList.filter(d => d.date && d.date.startsWith(selectedMonth));
+
+                return window.HRUtils.calculateFinancials(employee, filteredLogs, filteredDeductions);
+            }, [employee, logs, deductionsList, selectedMonth]);
+
+            useEffect(() => {
+                if(window.firebaseLoaded) {
+                    const qL = window.query(window.collection(window.db, "attendance"), window.where("userId", "==", employee.uid));
+                    const unsubL = window.onSnapshot(qL, s => {
+                        const data = s.docs.map(d => ({id:d.id, ...d.data()}));
+                        data.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+                        setLogs(data);
+                    });
+                    
+                    const qC = window.query(window.collection(window.db, "custody"), window.where("userId", "==", employee.uid));
+                    const unsubC = window.onSnapshot(qC, s => setCustodyList(s.docs.map(d => ({id:d.id, ...d.data()}))));
+                    
+                    const qD = window.query(window.collection(window.db, "deductions"), window.where("userId", "==", employee.uid));
+                    const unsubD = window.onSnapshot(qD, s => setDeductionsList(s.docs.map(d => ({id:d.id, ...d.data()}))));
+
+                    const qDoc = window.query(window.collection(window.db, "documents"), window.where("userId", "==", employee.uid));
+                    const unsubDoc = window.onSnapshot(qDoc, s => setDocuments(s.docs.map(d => ({id:d.id, ...d.data()}))));
+
+                    return () => { unsubL(); unsubC(); unsubD(); unsubDoc(); }
+                }
+            }, [employee.uid]);
+
+            const addItem = async (coll, data, setter, reset) => { if(!window.firebaseLoaded) return; await window.addDoc(window.collection(window.db, coll), { userId: employee.uid, ...data }); setter(reset); };
+
+            const InfoRow = ({ label, value }) => (
+                <div className="flex justify-between py-2 border-b border-slate-50 last:border-0 print-break-inside">
+                    <span className="text-slate-400 font-medium text-sm">{label}</span>
+                    <span className="text-slate-700 font-bold text-sm text-right">{value || '-'}</span>
+                </div>
+            );
+
+            // FIX: Improved Print Functionality
+            const printFullProfile = () => {
+                setActiveTab('all');
+                setTimeout(() => window.print(), 500);
+            };
+
+            const handleProfileEditRequest = async () => {
+                const changes = prompt("Please describe the changes you want to make (e.g., Change Phone Number to 0123456789):");
+                if (changes && changes.trim()) {
+                    await window.addDoc(window.collection(window.db, "requests"), {
+                        userId: employee.uid,
+                        userName: employee.name,
+                        type: 'Profile Edit',
+                        reason: changes,
+                        status: 'Pending',
+                        department: employee.department,
+                        timestamp: window.serverTimestamp()
+                    });
+                    alert("Request sent to HR successfully.");
+                }
+            };
+
+            const filteredLogsDisplay = logs.filter(l => new Date(l.timestamp?.seconds * 1000).toISOString().startsWith(selectedMonth));
+
+            return (
+                <div className="space-y-6 pb-10 animate-fade-in w-full">
+                    <div className="flex justify-between items-center no-print">
+                        <div className="flex gap-2">
+                            <button onClick={onBack} className="flex items-center gap-2 text-slate-500 hover:text-slate-800 font-bold"><Icon name="arrow-left" size={20} /> Back</button>
+                            <button onClick={printFullProfile} className="flex items-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-slate-700"><Icon name="printer" size={16}/> {t.printReport}</button>
+                        </div>
+                        {isHR && onEdit ?
+                            <button onClick={() => onEdit(employee)} className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-slate-200 transition-colors"><Icon name="edit" size={16}/> {t.edit}</button> :
+                            <button onClick={handleProfileEditRequest} className="flex items-center gap-2 bg-primary-50 text-primary-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-primary-100 transition-colors"><Icon name="edit-2" size={16}/> Request Edit</button>
+                        }
+                    </div>
+
+                    {/* Header Card */}
+                    <div className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 flex flex-col md:flex-row gap-8 relative overflow-hidden print-container print-break-inside">
+                        <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-r from-primary-600 to-primary-800"></div>
+                        <div className="relative z-10 mt-4 md:mt-0"><div className="w-32 h-32 rounded-full border-4 border-white shadow-lg bg-slate-100 flex items-center justify-center text-4xl font-bold text-slate-400">{employee.name?.charAt(0)}</div></div>
+                        <div className="relative z-10 flex-1 pt-4 md:pt-16">
+                            <h1 className="text-3xl font-bold text-slate-900 mt-2">{employee.name}</h1>
+                            <p className="text-primary-600 font-bold uppercase text-xs tracking-wider mb-4">{employee.position || t.role}</p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-slate-500">
+                                <div className="flex gap-2 items-center"><Icon name="mail" size={14}/> {employee.email}</div>
+                                <div className="flex gap-2 items-center"><Icon name="briefcase" size={14}/> {employee.department}</div>
+                            </div>
+                        </div>
+                        <div className="relative z-10 pt-4 md:pt-16 min-w-[200px]">
+                            {/* FIX: Added Date Filter to Header */}
+                            <div className="bg-white/90 backdrop-blur p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <div className="flex justify-between items-center mb-2 no-print">
+                                    <p className="text-xs text-slate-400 uppercase font-bold">{t.netSalary}</p>
+                                    <input type="month" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="text-xs border rounded p-1" />
+                                </div>
+                                <p className="text-xs text-slate-400 uppercase font-bold print-only">Net Salary ({selectedMonth})</p>
+                                <p className="text-3xl font-bold text-emerald-600 font-mono">${netSalary.toLocaleString()}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Tabs */}
+                    <div className="flex gap-1 border-b border-slate-200 no-print overflow-x-auto">
+                        {['profile', 'attendance', 'financials', 'custody', 'documents'].map(key => (
+                            <button key={key} onClick={() => setActiveTab(key)} className={`px-6 py-3 font-bold text-sm border-b-2 transition-all whitespace-nowrap ${activeTab === key ? 'border-primary-600 text-primary-700' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+                                {key === 'financials' ? t.deductions : key === 'profile' ? t.viewProfile : t[key]}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 min-h-[400px] print-container">
+                        {(activeTab === 'profile' || activeTab === 'all') && (
+                            <div className="mb-8 print-break-inside">
+                                <h2 className="text-xl font-bold text-slate-900 mb-4 border-b pb-2">Profile Details</h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div><h3 className="font-bold text-lg mb-4 text-slate-800 flex items-center gap-2"><Icon name="user" size={18}/> Personal Details</h3><div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
+                                    <InfoRow label={t.phone} value={employee.phone} />
+                                    <InfoRow label={t.nationality} value={employee.nationality} />
+                                    <InfoRow label={t.residency} value={employee.residency} />
+                                    <InfoRow label={t.residencyExpiry} value={employee.residencyExpiry} />
+                                    <InfoRow label={t.passport} value={employee.passport} />
+                                    <InfoRow label={t.passportExpiry} value={employee.passportExpiry} />
+                                    <InfoRow label={t.joinDate} value={employee.joinDate} />
+                                </div></div>
+                                <div><h3 className="font-bold text-lg mb-4 text-slate-800 flex items-center gap-2"><Icon name="credit-card" size={18}/> Banking & Salary</h3><div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 mb-6">
+                                    <InfoRow label={t.bankName} value={employee.bankName} />
+                                    <InfoRow label={t.iban} value={employee.iban} />
+                                    <InfoRow label={t.salary} value={`$${Number(employee.salary).toLocaleString()}`} />
+                                    <InfoRow label={t.housingAllowance} value={`$${Number(employee.housingAllowance||0).toLocaleString()}`} />
+                                    <InfoRow label={t.transportAllowance} value={`$${Number(employee.transportAllowance||0).toLocaleString()}`} />
+                                    <InfoRow label="Other Allowance" value={`$${Number(employee.otherAllowance||0).toLocaleString()}`} />
+                                </div>
+                                <h3 className="font-bold text-lg mb-4 text-slate-800 flex items-center gap-2"><Icon name="clock" size={18}/> Shift Settings</h3><div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
+                                    <InfoRow label={t.shiftStart} value={employee.shiftStart} />
+                                    <InfoRow label={t.shiftEnd} value={employee.shiftEnd} />
+                                </div>
+                                </div>
+                            </div>
+                            </div>
+                        )}
+                        {(activeTab === 'attendance' || activeTab === 'all') && (<div className="mb-8 print-break-inside">
+                            <h2 className="text-xl font-bold text-slate-900 mb-4 border-b pb-2">Attendance Log ({selectedMonth})</h2>
+                            <div className="flex gap-3 mb-6"><span className="px-3 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">{t.shiftStart}: {employee.shiftStart || DEFAULT_SHIFT_START}</span><span className="px-3 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">{t.shiftEnd}: {employee.shiftEnd || "17:00"}</span><span className="px-3 py-1 bg-red-50 text-red-600 rounded text-xs font-bold">{t.lateness}: {totalLateness}m</span></div>
+                            <table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500"><tr><th className="p-3">{t.date}</th><th className="p-3">Time</th><th className="p-3">{t.status}</th><th className="p-3">{t.lateness}</th><th className="p-3">Loc</th></tr></thead><tbody className="divide-y divide-slate-100">
+                            {filteredLogsDisplay.length > 0 ? filteredLogsDisplay.map(l => { const late = l.type === 'in' ? window.HRUtils?.calculateLateness(l.timestamp.seconds, employee.shiftStart) : 0; return (<tr key={l.id}><td className="p-3 font-medium">{new Date(l.timestamp.seconds*1000).toLocaleDateString()}</td><td className="p-3 font-mono">{new Date(l.timestamp.seconds*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td><td className="p-3"><span className={`px-2 py-0.5 rounded text-xs font-bold ${l.type==='in'?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700'}`}>{l.type.toUpperCase()}</span></td><td className="p-3 text-red-600 font-bold">{late > 0 ? `+${late}m` : '-'}</td><td className="p-3 text-xs text-slate-400 max-w-[100px] truncate">{l.location}</td></tr>)}) : <tr><td colSpan="5" className="p-4 text-center text-slate-400">No attendance records for {selectedMonth}</td></tr>}
+                            </tbody></table></div>)}
+                        
+                        {(activeTab === 'financials' || activeTab === 'all') && (<div className="mb-8 print-break-inside">
+                            <h2 className="text-xl font-bold text-slate-900 mb-4 border-b pb-2">Financials & Deductions ({selectedMonth})</h2>
+                            <div className="grid md:grid-cols-2 gap-8"><div><h3 className="font-bold mb-4">{t.deductions}</h3><div className="space-y-2 mb-4">
+                                {deductionsList.filter(d => d.date && d.date.startsWith(selectedMonth)).map(d => (<div key={d.id} className="flex justify-between p-3 bg-red-50 rounded-lg border border-red-100 text-sm"><span>{d.reason} <span className="text-slate-400 text-xs ml-2">{d.date}</span></span><span className="font-bold text-red-600">-${d.amount}</span></div>))}
+                                <div className="flex justify-between p-3 bg-orange-50 rounded-lg border border-orange-100 text-sm"><span>Late Fees ({totalLateness}m)</span><span className="font-bold text-orange-600">-${lateCost}</span></div></div>
+                                {isHR && <form onSubmit={(e) => {e.preventDefault(); addItem('deductions', newDeduction, setNewDeduction, {amount:'',reason:'',date:new Date().toISOString().split('T')[0]})}} className="flex gap-2 pt-4 border-t no-print"><input className="flex-1 p-2 border rounded text-sm" placeholder={t.reason} value={newDeduction.reason} onChange={e=>setNewDeduction({...newDeduction,reason:e.target.value})} /><input className="w-20 p-2 border rounded text-sm" type="number" placeholder="$" value={newDeduction.amount} onChange={e=>setNewDeduction({...newDeduction,amount:e.target.value})} /><button className="px-3 bg-red-600 text-white rounded text-sm font-bold">{t.save}</button></form>}</div><div className="bg-slate-50 p-6 rounded-2xl h-fit border border-slate-200"><h3 className="font-bold mb-4 border-b pb-2">Payslip Preview</h3><div className="space-y-2 text-sm"><div className="flex justify-between"><span>Base Salary</span><span className="font-mono">${Number(employee.salary).toLocaleString()}</span></div><div className="flex justify-between"><span>Allowances</span><span className="font-mono">+${(Number(employee.housingAllowance||0)+Number(employee.transportAllowance||0)+Number(employee.otherAllowance||0)).toLocaleString()}</span></div><div className="flex justify-between text-red-500"><span>Deductions</span><span className="font-mono">-${totalDeductions}</span></div><div className="flex justify-between text-orange-500"><span>Late Fees</span><span className="font-mono">-${lateCost}</span></div><div className="flex justify-between font-bold text-lg pt-2 border-t mt-2"><span>Net Pay</span><span className="font-mono text-emerald-600">${netSalary.toLocaleString()}</span></div></div></div></div></div>)}
+                        
+                        {(activeTab === 'custody' || activeTab === 'all') && (<div className="mb-8 print-break-inside">
+                            <h2 className="text-xl font-bold text-slate-900 mb-4 border-b pb-2">Custody (Assets)</h2>
+                            <h3 className="font-bold mb-4">{t.custody}</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">{custodyList.map(c => (<div key={c.id} className="p-4 bg-blue-50 rounded-xl border border-blue-100 flex justify-between items-center"><div><p className="font-bold text-slate-800">{c.name}</p><p className="text-xs text-blue-400">{c.date}</p></div><Icon name="box" className="text-blue-300" /></div>))}</div>{isHR && <form onSubmit={(e) => {e.preventDefault(); addItem('custody', newItem, setNewItem, {name:'',date:''})}} className="flex gap-2 max-w-md no-print"><input className="flex-1 p-2 border rounded text-sm" placeholder={t.itemName} value={newItem.name} onChange={e=>setNewItem({...newItem,name:e.target.value})} /><input className="w-32 p-2 border rounded text-sm" type="date" value={newItem.date} onChange={e=>setNewItem({...newItem,date:e.target.value})} /><button className="px-4 bg-primary-600 text-white rounded text-sm font-bold">{t.save}</button></form>}</div>)}
+                        
+                        {(activeTab === 'documents' || activeTab === 'all') && (
+                            <div className="mb-8 print-break-inside">
+                                <h2 className="text-xl font-bold text-slate-900 mb-4 border-b pb-2">Documents</h2>
+                                <h3 className="font-bold mb-4">{t.documents}</h3>
+                                <div className="grid gap-4 mb-6">
+                                    {documents.map(d => (
+                                        <div key={d.id} className="p-4 bg-slate-50 rounded-xl border border-slate-200 flex justify-between items-center">
+                                            <div className="flex items-center gap-4">
+                                                <div className="w-10 h-10 bg-slate-200 rounded-lg flex items-center justify-center text-slate-500"><Icon name="file-text" size={20}/></div>
+                                                <div><p className="font-bold text-slate-800">{d.title}</p><p className="text-xs text-slate-500">{t.expiryDate}: {d.expiry || '-'}</p></div>
+                                            </div>
+                                            {isHR && <button onClick={()=>window.deleteDoc(window.doc(window.db, "documents", d.id))} className="text-red-400 hover:text-red-600 no-print"><Icon name="trash-2" size={16}/></button>}
+                                        </div>
+                                    ))}
+                                    {documents.length === 0 && <p className="text-slate-400 text-sm">No documents found.</p>}
+                                </div>
+                                {isHR && <form onSubmit={(e)=>{e.preventDefault(); addItem('documents', newDoc, setNewDoc, {title:'',expiry:''})}} className="bg-slate-50 p-4 rounded-xl border border-slate-200 max-w-lg no-print">
+                                    <h4 className="font-bold text-sm mb-3">Add Document Record</h4>
+                                    <div className="space-y-3">
+                                        <input className="w-full p-2 border rounded text-sm" placeholder="Document Title (e.g. Passport Copy)" value={newDoc.title} onChange={e=>setNewDoc({...newDoc,title:e.target.value})} />
+                                        <div className="flex items-center gap-2"><span className="text-xs font-bold text-slate-500 uppercase">{t.expiryDate}</span><input type="date" className="flex-1 p-2 border rounded text-sm" value={newDoc.expiry} onChange={e=>setNewDoc({...newDoc,expiry:e.target.value})} /></div>
+                                        <button className="w-full py-2 bg-slate-800 text-white rounded text-sm font-bold">{t.save}</button>
+                                    </div>
+                                </form>}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const Tasks = ({ t, user, users = [], onError }) => {
+            const [tasks, setTasks] = useState([]);
+            const [showForm, setShowForm] = useState(false);
+            const [newTask, setNewTask] = useState({ title: '', description: '', assignedTo: '', dueDate: '' });
+            const [selectedTask, setSelectedTask] = useState(null);
+            const showToast = useToast();
+            const handleDelete = useGlobalDelete(user);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                let q;
+                if (['HR', 'Manager', 'Owner'].includes(user.role)) {
+                    q = window.query(window.collection(window.db, "tasks"), window.orderBy("timestamp", "desc"));
+                } else {
+                    q = window.query(window.collection(window.db, "tasks"), window.where("assignedTo", "in", [user.uid, `dept_${user.department}`]));
+                }
+                const unsub = window.onSnapshot(q, s => {
+                    const data = s.docs.map(d => ({id:d.id, ...d.data()}));
+                    setTasks(data);
+                }, (e) => {
+                    if(e.code === 'permission-denied' && onError) onError();
+                });
+                return () => unsub();
+            }, [user]);
+
+            const createTask = async (e) => {
+                e.preventDefault();
+                await window.addDoc(window.collection(window.db, "tasks"), {
+                    ...newTask, assignedBy: user.uid, assignedByName: user.name, status: 'Pending', timestamp: window.serverTimestamp()
+                });
+                setShowForm(false); showToast("Task Assigned", "success");
+            };
+
+            const updateStatus = async (id, status) => { await window.updateDoc(window.doc(window.db, "tasks", id), { status }); };
+
+            return (
+                <div className="space-y-6 animate-fade-in pb-10">
+                    <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-slate-800">{t.tasks}</h2>{(['HR', 'Manager', 'Owner'].includes(user.role) || user.canCreateTask) && <button onClick={()=>setShowForm(true)} className="bg-primary-600 text-white px-4 py-2 rounded-xl flex gap-2 font-bold text-sm shadow-lg"><Icon name="plus" size={18}/> {t.assignTask}</button>}</div>
+                    {showForm && (<div className="bg-white p-6 rounded-2xl shadow-xl mb-6"><form onSubmit={createTask} className="space-y-4"><input className="w-full p-3 border rounded-xl" placeholder={t.taskTitle} required value={newTask.title} onChange={e=>setNewTask({...newTask, title:e.target.value})} /><textarea className="w-full p-3 border rounded-xl" placeholder={t.taskDesc} required value={newTask.description} onChange={e=>setNewTask({...newTask, description:e.target.value})} /><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500 uppercase">{t.assignedTo}</label><select className="w-full p-3 border rounded-xl" value={newTask.assignedTo} onChange={e=>setNewTask({...newTask, assignedTo:e.target.value})}><option value="">Select Employee or Department</option><optgroup label="Departments">{[...new Set(users.map(u => u.department).filter(Boolean))].map(d => <option key={d} value={`dept_${d}`}>{d}</option>)}</optgroup><optgroup label="Employees">{users.map(u => <option key={u.id} value={u.uid || u.id}>{u.name}</option>)}</optgroup></select></div><div className="grid grid-cols-2 gap-2"><div><label className="text-xs font-bold text-slate-500 uppercase">Start Date</label><input type="date" className="w-full p-3 border rounded-xl" value={newTask.startDate || ''} onChange={e=>setNewTask({...newTask, startDate:e.target.value})} /></div><div><label className="text-xs font-bold text-slate-500 uppercase">{t.dueDate}</label><input type="date" className="w-full p-3 border rounded-xl" value={newTask.dueDate} onChange={e=>setNewTask({...newTask, dueDate:e.target.value})} /></div></div></div><div className="flex justify-end gap-2"><button type="button" onClick={()=>setShowForm(false)} className="px-4 py-2 text-slate-500 font-bold">{t.cancel}</button><button className="px-6 py-2 bg-primary-600 text-white rounded-xl font-bold">{t.submit}</button></div></form></div>)}
+                    <div className="grid gap-4">{tasks.map(task => (<div key={task.id} onClick={()=>setSelectedTask(task)} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 group cursor-pointer hover:shadow-md transition-all"><div className="flex items-start gap-4"><div className={`mt-1 w-10 h-10 rounded-full flex items-center justify-center ${task.status === 'Completed' ? 'bg-green-100 text-green-600' : 'bg-primary-50 text-primary-600'}`}><Icon name={task.status === 'Completed' ? 'check' : 'clipboard-list'} size={20}/></div><div><h3 className={`font-bold text-lg ${task.status === 'Completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}>{task.title}</h3><p className="text-sm text-slate-600 mb-1 line-clamp-2">{task.description}</p><div className="flex gap-3 text-xs text-slate-400"><span className="flex items-center gap-1"><Icon name="calendar" size={12}/> Due: {task.dueDate || 'No Date'}</span><span className="flex items-center gap-1"><Icon name="user" size={12}/> By: {task.assignedByName}</span>{task.assignedTo.startsWith('dept_') && <span className="bg-slate-100 px-2 rounded text-slate-500 font-bold">Dept: {task.assignedTo.replace('dept_', '')}</span>}</div></div></div><div className="flex items-center gap-3" onClick={e=>e.stopPropagation()}><select className={`p-2 rounded-lg text-xs font-bold outline-none ${task.status==='Completed'?'bg-green-50 text-green-700':task.status==='In Progress'?'bg-blue-50 text-blue-700':'bg-slate-100 text-slate-600'}`} value={task.status} onChange={(e) => updateStatus(task.id, e.target.value)} disabled={!['HR','Manager','Owner'].includes(user.role) && user.uid !== task.assignedTo && !task.assignedTo.startsWith('dept_')}><option value="Pending">Pending</option><option value="In Progress">In Progress</option><option value="Completed">Completed</option></select>{['HR','Manager','Owner'].includes(user.role) && (<button onClick={()=>handleDelete("tasks", task.id, `Task: ${task.title}`)} className="p-2 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"><Icon name="trash-2" size={16}/></button>)}</div></div>))}</div>
+
+                    {selectedTask && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setSelectedTask(null)}>
+                            <div className="bg-white rounded-2xl max-w-lg w-full p-8 shadow-2xl relative border border-slate-100" onClick={(e) => e.stopPropagation()}>
+                                <button onClick={() => setSelectedTask(null)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"><Icon name="x" /></button>
+                                <h3 className="text-2xl font-bold text-slate-800 mb-6 border-b pb-4">Task Details</h3>
+                                <div className="space-y-4">
+                                    <h4 className="font-bold text-lg text-slate-800">{selectedTask.title}</h4>
+                                    <div className="bg-slate-50 p-4 rounded-xl text-slate-600 text-sm whitespace-pre-line">{selectedTask.description}</div>
+                                    <div className="grid grid-cols-2 gap-4 pt-2">
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Assigned To</label><p className="font-bold text-slate-800">{selectedTask.assignedTo.startsWith('dept_') ? `Department: ${selectedTask.assignedTo.replace('dept_', '')}` : users.find(u=>u.uid===selectedTask.assignedTo || u.id===selectedTask.assignedTo)?.name || 'Unknown'}</p></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Assigned By</label><p className="font-bold text-slate-800">{selectedTask.assignedByName}</p></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Due Date</label><p className="font-bold text-slate-800">{selectedTask.dueDate || '-'}</p></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Status</label><span className={`inline-block mt-1 text-xs font-bold px-2 py-1 rounded-full ${selectedTask.status==='Completed'?'bg-green-100 text-green-700':selectedTask.status==='In Progress'?'bg-blue-100 text-blue-700':'bg-slate-100 text-slate-700'}`}>{selectedTask.status}</span></div>
+                                    </div>
+                                    {['HR','Manager','Owner'].includes(user.role) && (
+                                        <div className="flex justify-end pt-4 border-t">
+                                            <button onClick={()=>{handleDelete("tasks", selectedTask.id, selectedTask.title); setSelectedTask(null);}} className="bg-red-50 text-red-600 px-4 py-2 rounded-lg font-bold text-sm hover:bg-red-100 flex items-center gap-2"><Icon name="trash-2" size={16}/> Delete Task</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const Dashboard = ({ t, user, setView, requests = [], users = [] }) => {
+            const pendingRequests = requests.filter(r => r.status === 'Pending').length;
+            const pendingUsers = users.filter(u => u.status === 'pending').length;
+            const isManager = ['HR', 'Manager', 'Owner'].includes(user.role);
+            const [attendanceStats, setAttendanceStats] = useState({ late: 0, checkedIn: 0 });
+
+            useEffect(() => {
+                if (isManager && window.firebaseLoaded) {
+                    const today = new Date(); today.setHours(0,0,0,0);
+                    const q = window.query(window.collection(window.db, "attendance"), window.where("timestamp", ">=", today));
+                    const unsub = window.onSnapshot(q, s => {
+                        const logs = s.docs.map(d=>d.data());
+                        const checkedIn = new Set(logs.map(l=>l.userId)).size;
+                        const late = logs.filter(l => l.type === 'in' && window.HRUtils.calculateLateness(l.timestamp.seconds, "09:00") > 0).length;
+                        setAttendanceStats({ checkedIn, late });
+                    });
+                    return () => unsub();
+                }
+            }, [isManager]);
+
+            return (
+                <div className="space-y-8 animate-fade-in pb-10">
+                    <div className="bg-gradient-to-r from-slate-800 to-slate-900 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden"><div className="relative z-10"><h2 className="text-3xl font-bold mb-2">{t.welcome} {user.name} 👋</h2><p className="opacity-80 text-sm max-w-lg">Manage your team, track attendance, and handle requests efficiently.</p></div><Icon name="activity" size={180} className="absolute -right-10 -bottom-10 text-white opacity-5" /></div>
+                    {isManager && (<div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4"><div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100"><p className="text-xs font-bold text-slate-400 uppercase mb-2">{t.totalEmployees}</p><p className="text-3xl font-bold text-slate-800">{users.filter(u=>u.status!=='pending').length}</p></div><div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100"><p className="text-xs font-bold text-slate-400 uppercase mb-2">Checked In Today</p><p className="text-3xl font-bold text-emerald-600">{attendanceStats.checkedIn}</p></div><div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100"><p className="text-xs font-bold text-slate-400 uppercase mb-2">Late Today</p><p className="text-3xl font-bold text-red-600">{attendanceStats.late}</p></div><div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100"><p className="text-xs font-bold text-slate-400 uppercase mb-2">{t.pending}</p><p className="text-3xl font-bold text-orange-500">{pendingRequests}</p></div></div>)}
+                    {isManager && (pendingRequests > 0 || pendingUsers > 0) && (<div className="bg-orange-50 border border-orange-100 rounded-2xl p-6"><h3 className="font-bold text-orange-800 mb-4 flex items-center gap-2"><Icon name="bell" size={20}/> {t.pendingActions}</h3><div className="flex gap-4">{pendingRequests > 0 && <button onClick={() => setView('requests')} className="bg-white text-orange-600 px-4 py-2 rounded-xl text-sm font-bold shadow-sm border border-orange-200">{pendingRequests} {t.requests}</button>}{pendingUsers > 0 && <button onClick={() => setView('employees')} className="bg-white text-orange-600 px-4 py-2 rounded-xl text-sm font-bold shadow-sm border border-orange-200">{pendingUsers} {t.joinRequests}</button>}</div></div>)}
+                    <div><h3 className="font-bold text-lg mb-4 text-slate-700">{t.quickActions}</h3><div className="grid grid-cols-2 md:grid-cols-4 gap-4"><button onClick={() => setView('attendance')} className="p-5 bg-white rounded-2xl shadow-sm border border-slate-100 hover:border-primary-200 hover:shadow-md transition-all text-center group"><div className="w-12 h-12 mx-auto bg-primary-50 text-primary-600 rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Icon name="clock" size={24}/></div><span className="font-semibold text-slate-700 text-sm">{t.attendance}</span></button><button onClick={() => setView('requests')} className="p-5 bg-white rounded-2xl shadow-sm border border-slate-100 hover:border-primary-200 hover:shadow-md transition-all text-center group"><div className="w-12 h-12 mx-auto bg-emerald-50 text-emerald-600 rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Icon name="file-plus" size={24}/></div><span className="font-semibold text-slate-700 text-sm">{t.newRequest}</span></button><button onClick={() => setView('chat')} className="p-5 bg-white rounded-2xl shadow-sm border border-slate-100 hover:border-primary-200 hover:shadow-md transition-all text-center group"><div className="w-12 h-12 mx-auto bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Icon name="message-square" size={24}/></div><span className="font-semibold text-slate-700 text-sm">{t.chat}</span></button><button onClick={() => setView('tasks')} className="p-5 bg-white rounded-2xl shadow-sm border border-slate-100 hover:border-primary-200 hover:shadow-md transition-all text-center group"><div className="w-12 h-12 mx-auto bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Icon name="check-square" size={24}/></div><span className="font-semibold text-slate-700 text-sm">{t.tasks}</span></button></div></div>
+                </div>
+            );
+        };
+
+        const Employees = ({ t, user, onError }) => {
+            const [users, setUsers] = useState([]);
+            const [tab, setTab] = useState('active');
+            const [viewId, setViewId] = useState(null);
+            const [showForm, setShowForm] = useState(false);
+            const [formData, setFormData] = useState({});
+            const showToast = useToast();
+            const handleDelete = useGlobalDelete(user);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const unsub = window.onSnapshot(window.collection(window.db, "users"), (s) => setUsers(s.docs.map(d => ({id:d.id, ...d.data()}))), (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+                return () => unsub();
+            }, []);
+
+            const handleAction = async (action, id, data = null) => {
+                try {
+                    if (action === 'delete') { const desc = data ? `${data.name} (${data.role})` : "Employee"; await handleDelete("users", id, desc); }
+                    else if (action === 'approve') { await window.updateDoc(window.doc(window.db, "users", id), { status: 'active' }); showToast("Approved", "success"); }
+                    else if (action === 'create' || action === 'update') {
+                        const payload = { ...data, status: 'active', createdAt: window.serverTimestamp() };
+                        if (action === 'update') await window.updateDoc(window.doc(window.db, "users", id), data);
+                        else await window.addDoc(window.collection(window.db, "users"), payload);
+                        setShowForm(false); showToast("Saved", "success");
+                    }
+                } catch(e) { }
+            };
+
+            // FIX: Use the UPDATED EmployeeProfile component here
+            if (viewId) return <EmployeeProfile t={t} employee={users.find(u => u.id === viewId)} onBack={()=>setViewId(null)} isHR={true} onError={onError} onEdit={(u) => { setFormData(u); setShowForm(true); setViewId(null); }} />;
+            
+            const pending = users.filter(u => u.status === 'pending');
+            const active = users.filter(u => u.status !== 'pending');
+            const list = tab === 'active' ? active : pending;
+
+            return (
+                <div className="space-y-6 animate-fade-in pb-10">
+                    <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-slate-800">{t.employees}</h2><button onClick={()=>{setFormData({}); setShowForm(true)}} className="bg-primary-600 text-white px-4 py-2 rounded-xl flex gap-2 font-bold text-sm shadow-lg hover:bg-primary-700 transition-colors"><Icon name="plus" size={18}/> {t.addEmployee}</button></div>
+                    <div className="flex gap-2 border-b border-slate-200"><button onClick={()=>setTab('active')} className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors ${tab==='active'?'border-primary-600 text-primary-700':'border-transparent text-slate-500'}`}>{t.activeEmployees} ({active.length})</button><button onClick={()=>setTab('pending')} className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${tab==='pending'?'border-primary-600 text-primary-700':'border-transparent text-slate-500'}`}>{t.joinRequests} {pending.length > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full">{pending.length}</span>}</button></div>
+                    {showForm && (<div className="bg-white p-6 rounded-2xl shadow-xl border border-slate-200 mb-6 animate-fade-in"><h3 className="font-bold mb-4">{t.addEmployee}</h3><form onSubmit={(e)=>{e.preventDefault(); handleAction(formData.id?'update':'create', formData.id, formData)}} className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><input className="p-3 border rounded-xl" placeholder={t.fullName} required value={formData.name||''} onChange={e=>setFormData({...formData, name:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.email} required type="email" value={formData.email||''} onChange={e=>setFormData({...formData, email:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.position} value={formData.position||''} onChange={e=>setFormData({...formData, position:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.department} value={formData.department||''} onChange={e=>setFormData({...formData, department:e.target.value})} /><select className="p-3 border rounded-xl" value={formData.role||'Employee'} onChange={e=>setFormData({...formData, role:e.target.value})}><option value="Employee">Employee</option><option value="Manager">Manager</option><option value="HR">HR</option><option value="Owner">Owner</option></select><input className="p-3 border rounded-xl" placeholder={t.phone} value={formData.phone||''} onChange={e=>setFormData({...formData, phone:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.nationality} value={formData.nationality||''} onChange={e=>setFormData({...formData, nationality:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.residency} value={formData.residency||''} onChange={e=>setFormData({...formData, residency:e.target.value})} /><div className="flex gap-2 items-center"><span className="text-xs uppercase font-bold text-slate-500 w-20">{t.residencyExpiry}</span><input type="date" className="flex-1 p-3 border rounded-xl" value={formData.residencyExpiry||''} onChange={e=>setFormData({...formData, residencyExpiry:e.target.value})} /></div><input className="p-3 border rounded-xl" placeholder={t.passport} value={formData.passport||''} onChange={e=>setFormData({...formData, passport:e.target.value})} /><div className="flex gap-2 items-center"><span className="text-xs uppercase font-bold text-slate-500 w-20">{t.passportExpiry}</span><input type="date" className="flex-1 p-3 border rounded-xl" value={formData.passportExpiry||''} onChange={e=>setFormData({...formData, passportExpiry:e.target.value})} /></div><div className="flex gap-2 items-center"><span className="text-xs uppercase font-bold text-slate-500 w-20">{t.joinDate}</span><input type="date" className="flex-1 p-3 border rounded-xl" value={formData.joinDate||''} onChange={e=>setFormData({...formData, joinDate:e.target.value})} /></div></div>
+                        <div className="border-t pt-4"><h4 className="font-bold text-sm mb-2 text-slate-500">Financials</h4><div className="grid grid-cols-1 md:grid-cols-3 gap-4"><input className="p-3 border rounded-xl" placeholder={t.salary} type="number" min="0" value={formData.salary||''} onChange={e=>setFormData({...formData, salary:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.housingAllowance} type="number" min="0" value={formData.housingAllowance||''} onChange={e=>setFormData({...formData, housingAllowance:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.transportAllowance} type="number" min="0" value={formData.transportAllowance||''} onChange={e=>setFormData({...formData, transportAllowance:e.target.value})} /><input className="p-3 border rounded-xl" placeholder="Other Allowance" type="number" min="0" value={formData.otherAllowance||''} onChange={e=>setFormData({...formData, otherAllowance:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.bankName} value={formData.bankName||''} onChange={e=>setFormData({...formData, bankName:e.target.value})} /><input className="p-3 border rounded-xl" placeholder={t.iban} value={formData.iban||''} onChange={e=>setFormData({...formData, iban:e.target.value})} /></div></div>
+                        <div className="border-t pt-4">
+                            <h4 className="font-bold text-sm mb-2 text-slate-500">Permissions</h4>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={formData.canCreateMeeting||false} onChange={e=>setFormData({...formData, canCreateMeeting:e.target.checked})} /> Can Schedule Meetings</label>
+                                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={formData.canCreateTask||false} onChange={e=>setFormData({...formData, canCreateTask:e.target.checked})} /> Can Create Tasks</label>
+                                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={formData.canViewReports||false} onChange={e=>setFormData({...formData, canViewReports:e.target.checked})} /> Can View Reports</label>
+                                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={formData.canViewEmployees||false} onChange={e=>setFormData({...formData, canViewEmployees:e.target.checked})} /> Can View Employees</label>
+                            </div>
+                        </div>
+                        <div className="border-t pt-4"><h4 className="font-bold text-sm mb-2 text-slate-500">Shift</h4><div className="flex gap-4"><div className="flex-1"><label className="text-xs font-bold text-slate-400">{t.shiftStart}</label><input type="time" className="w-full p-3 border rounded-xl" value={formData.shiftStart||"09:00"} onChange={e=>setFormData({...formData, shiftStart:e.target.value})} /></div><div className="flex-1"><label className="text-xs font-bold text-slate-400">{t.shiftEnd}</label><input type="time" className="w-full p-3 border rounded-xl" value={formData.shiftEnd||"17:00"} onChange={e=>setFormData({...formData, shiftEnd:e.target.value})} /></div></div></div>
+                        <div className="flex justify-end gap-2 mt-4"><button type="button" onClick={()=>setShowForm(false)} className="px-4 py-2 text-slate-500 font-bold">{t.cancel}</button><button className="px-6 py-2 bg-primary-600 text-white rounded-xl font-bold">{t.save}</button></div></form></div>)}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">{list.map(u => (<div key={u.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all group relative"><div className="flex items-center gap-4 mb-4"><div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-500 text-lg">{u.name?.charAt(0)}</div><div><h3 className="font-bold text-slate-800">{u.name}</h3><p className="text-xs text-primary-600 font-bold uppercase">{u.position || u.role}</p></div></div><div className="space-y-2 text-sm text-slate-500 mb-6"><div className="flex items-center gap-2"><Icon name="mail" size={14}/> {u.email}</div><div className="flex items-center gap-2"><Icon name="briefcase" size={14}/> {u.department}</div></div><div className="flex gap-2">{tab === 'active' ? (<><button onClick={()=>setViewId(u.id)} className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100">{t.viewProfile}</button><button onClick={()=>handleAction('delete', u.id, u)} className="p-2 bg-red-50 text-red-500 rounded-lg hover:bg-red-100"><Icon name="trash-2" size={16}/></button></>) : (<><button onClick={()=>handleAction('approve', u.id)} className="flex-1 py-2 bg-green-50 text-green-600 rounded-lg text-xs font-bold hover:bg-green-100">{t.approveUser}</button><button onClick={()=>handleAction('delete', u.id, u)} className="p-2 bg-red-50 text-red-500 rounded-lg hover:bg-red-100"><Icon name="x" size={16}/></button></>)}</div></div>))}</div>
+                </div>
+            );
+        };
+
+        const Requests = ({ t, user, users = [], onError }) => {
+            const [list, setList] = useState([]);
+            const [delRequests, setDelRequests] = useState([]);
+            const [showForm, setShowForm] = useState(false);
+            const [activeTab, setActiveTab] = useState('requests');
+            // 'requests' is default. For Owner, it means "All" or the currently selected category.
+            // Let's use activeTab to store category for Owner: 'Loan', 'Leave', 'Permission', 'Other'.
+            const [ownerCategory, setOwnerCategory] = useState('Loan');
+            const [form, setForm] = useState({ type: 'Loan', reason: '', amount: '', subtype: '' });
+            const [selectedRequest, setSelectedRequest] = useState(null); // For detailed view
+            const showToast = useToast();
+            const handleDelete = useGlobalDelete(user);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const q = ['HR','Manager','Owner'].includes(user.role) ? window.collection(window.db, "requests") : window.query(window.collection(window.db, "requests"), window.where("userId", "==", user.uid));
+                const unsub = window.onSnapshot(q, s => {
+                     const data = s.docs.map(d => ({id:d.id, ...d.data()}));
+                     data.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+                     setList(data);
+                }, (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+
+                let unsubDel = () => {};
+                if (user.role === 'Manager') {
+                    const qDel = window.query(window.collection(window.db, "deletion_requests"), window.where("status", "==", "Pending"));
+                    unsubDel = window.onSnapshot(qDel, s => setDelRequests(s.docs.map(d => ({id:d.id, ...d.data()}))));
+                }
+                return () => { unsub(); unsubDel(); }
+            }, [user]);
+
+            const submit = async (e) => {
+                e.preventDefault();
+                if (user.role !== 'Employee') { showToast("Only Employees can create requests.", "error"); return; }
+                await window.addDoc(window.collection(window.db, "requests"), { userId: user.uid, userName: user.name, ...form, status: 'Pending', timestamp: window.serverTimestamp() });
+                setShowForm(false); showToast(t.reqSuccess, "success");
+            };
+
+            const statusUpdate = async (id, status, req) => {
+                await window.updateDoc(window.doc(window.db, "requests", id), { status });
+                if (status === 'Approved' && req.type === 'Loan' && req.amount) {
+                    try {
+                        await window.addDoc(window.collection(window.db, "deductions"), {
+                            userId: req.userId, amount: req.amount, reason: `Loan Request Approved`, date: new Date().toISOString().split('T')[0], timestamp: window.serverTimestamp()
+                        });
+                        showToast("Loan approved & deduction added", "success");
+                    } catch(e) { }
+                }
+            };
+
+            const handleDelRequest = async (req, approve) => {
+                try {
+                    if (approve) {
+                        await window.deleteDoc(window.doc(window.db, req.targetCollection, req.targetId));
+                        await window.deleteDoc(window.doc(window.db, "deletion_requests", req.id));
+                        showToast("Request Approved & Item Deleted", "success");
+                    } else {
+                        await window.deleteDoc(window.doc(window.db, "deletion_requests", req.id));
+                        showToast("Request Rejected", "info");
+                    }
+                } catch(e) { showToast("Action Failed", "error"); }
+            };
+
+            const isOwner = user.role === 'Owner';
+
+            // Filter list for Owner based on category
+            const filteredList = isOwner ? list.filter(r => {
+                if (ownerCategory === 'Loan') return r.type === 'Loan';
+                if (ownerCategory === 'Leave') return r.type === 'Leave';
+                if (ownerCategory === 'Permission') return ['Permission', 'Travel', 'Mission'].includes(r.type) || r.type.includes('Permission');
+                if (ownerCategory === 'Other') return !['Loan', 'Leave', 'Permission', 'Travel', 'Mission'].includes(r.type);
+                return true;
+            }) : list;
+
+            return (
+                <div className="space-y-6 animate-fade-in pb-10">
+                    <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-slate-800">{t.requests}</h2>{user.role === 'Employee' && <button onClick={()=>setShowForm(true)} className="bg-primary-600 text-white px-4 py-2 rounded-xl flex gap-2 font-bold text-sm shadow-lg"><Icon name="plus" size={18}/> {t.newRequest}</button>}</div>
+
+                    {user.role === 'Manager' && !isOwner && (<div className="flex gap-2 border-b border-slate-200 mb-4"><button onClick={()=>setActiveTab('requests')} className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors ${activeTab==='requests'?'border-primary-600 text-primary-700':'border-transparent text-slate-500'}`}>Leave/Loan Requests</button><button onClick={()=>setActiveTab('deletions')} className={`px-4 py-2 font-bold text-sm border-b-2 transition-colors flex items-center gap-2 ${activeTab==='deletions'?'border-primary-600 text-primary-700':'border-transparent text-slate-500'}`}>Deletion Requests {delRequests.length > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full">{delRequests.length}</span>}</button></div>)}
+
+                    {isOwner && (
+                        <div className="flex gap-1 border-b border-slate-200 mb-6 overflow-x-auto">
+                            {['Loan', 'Leave', 'Permission', 'Other'].map(cat => (
+                                <button key={cat} onClick={()=>setOwnerCategory(cat)} className={`px-6 py-3 font-bold text-sm border-b-2 transition-all whitespace-nowrap ${ownerCategory === cat ? 'border-primary-600 text-primary-700' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+                                    {cat === 'Loan' ? 'Loan Requests' : cat === 'Leave' ? 'Leave Requests' : cat === 'Permission' ? 'Permission Requests' : 'Other Requests'}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {showForm && (<div className="bg-white p-6 rounded-2xl shadow-xl mb-6 border border-slate-100"><h3 className="font-bold mb-4 text-slate-700">{t.newRequest}</h3><form onSubmit={submit} className="space-y-4">
+                        <select className="w-full p-3 border rounded-xl" onChange={e=>setForm({...form, type:e.target.value})}><option value="Loan">{t.loan}</option><option value="Leave">{t.leave}</option><option value="Permission">Absence Permission</option><option value="Travel">Travel Permission</option><option value="Mission">Work Mission</option><option value="Other">{t.otherRequest}</option></select>
+                        {form.type === 'Loan' && <input type="number" min="0" placeholder="Amount" required className="w-full p-3 border rounded-xl" onChange={e=>setForm({...form, amount:e.target.value})} />}
+                        {form.type === 'Leave' && <select className="w-full p-3 border rounded-xl" onChange={e=>setForm({...form, subtype:e.target.value})}><option value="">Select Leave Type</option><option value="Sick">Sick Leave</option><option value="Rest">Rest</option><option value="Other">Other</option></select>}
+                        {(form.type === 'Permission' || form.type === 'Travel' || form.type === 'Mission') && <div className="flex gap-2"><input type="time" className="flex-1 p-3 border rounded-xl" onChange={e=>setForm({...form, from:e.target.value})} /><input type="time" className="flex-1 p-3 border rounded-xl" onChange={e=>setForm({...form, to:e.target.value})} /></div>}
+                        <textarea className="w-full p-3 border rounded-xl" placeholder={t.reason} required onChange={e=>setForm({...form, reason:e.target.value})} /><div className="flex justify-end gap-2"><button type="button" onClick={()=>setShowForm(false)} className="px-4 py-2 text-slate-500 font-bold">{t.cancel}</button><button className="px-6 py-2 bg-primary-600 text-white rounded-xl font-bold">{t.submit}</button></div>
+                    </form></div>)}
+
+                    {activeTab === 'deletions' && user.role === 'Manager' && !isOwner ? (<div className="grid gap-4">{delRequests.map(req => (<div key={req.id} className="bg-red-50 p-5 rounded-2xl border border-red-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4"><div><h3 className="font-bold text-red-800 flex items-center gap-2"><Icon name="trash-2" size={16}/> Delete Request</h3><p className="text-sm text-red-600 mt-1"><b>{req.requesterName}</b> wants to delete {req.description}</p></div><div className="flex gap-2"><button onClick={()=>handleDelRequest(req, true)} className="bg-red-600 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm hover:bg-red-700">Delete</button><button onClick={()=>handleDelRequest(req, false)} className="bg-white text-slate-600 px-4 py-2 rounded-lg text-xs font-bold shadow-sm hover:bg-slate-50">Cancel</button></div></div>))}</div>) : (
+                        <div className="grid gap-4">{filteredList.map(r => { const reqUser = users.find(u => u.uid === r.userId); return (
+                            <div key={r.id} onClick={() => setSelectedRequest(r)} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 cursor-pointer hover:shadow-md transition-all">
+                                <div>
+                                    <div className="flex items-center gap-3 mb-1">
+                                        <span className="font-bold text-slate-700">{r.type}</span>
+                                        <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded-full ${r.status==='Approved'?'bg-green-100 text-green-700':r.status==='Rejected'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}`}>{r.status}</span>
+                                        <span className="text-[10px] text-slate-400 font-mono ml-2">{new Date(r.timestamp?.seconds*1000).toLocaleString()}</span>
+                                        <span className="text-[10px] text-slate-300 font-mono ml-2">#REQ-{r.id.substr(0,6)}</span>
+                                    </div>
+                                    <p className="text-sm text-slate-600">{r.reason} {r.amount && <span className="font-bold text-xs ml-1 text-red-600">(${r.amount})</span>}</p>
+                                    <div className="mt-2 flex items-start gap-1 text-slate-400"><Icon name="user" size={12} className="mt-0.5"/><div><p className="text-xs font-bold text-slate-500">{r.userName}</p>{reqUser?.department && <p className="text-[10px] uppercase text-slate-300">{reqUser.department}</p>}</div></div>
+                                </div>
+                                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>{['HR','Manager','Owner'].includes(user.role) && r.status === 'Pending' && (<div className="flex gap-2 mr-2"><button onClick={()=>statusUpdate(r.id, 'Approved', r)} className="p-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100"><Icon name="check" size={18}/></button><button onClick={()=>statusUpdate(r.id, 'Rejected', r)} className="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100"><Icon name="x" size={18}/></button></div>)}{['HR','Manager','Owner'].includes(user.role) && <button onClick={()=>handleDelete("requests", r.id, `Request: ${r.type} by ${r.userName}`)} className="p-2 text-slate-300 hover:text-red-500 transition-colors"><Icon name="trash-2" size={16}/></button>}</div>
+                            </div>
+                        ); })}</div>
+                    )}
+
+                    {selectedRequest && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setSelectedRequest(null)}>
+                            <div className="bg-white rounded-2xl max-w-lg w-full p-8 shadow-2xl relative border border-slate-100" onClick={(e) => e.stopPropagation()}>
+                                <button onClick={() => setSelectedRequest(null)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"><Icon name="x" /></button>
+                                <h3 className="text-2xl font-bold text-slate-800 mb-6 border-b pb-4 flex justify-between items-center">
+                                    <span>Request Details</span>
+                                    <span className="text-xs text-slate-300 font-mono">#REQ-{selectedRequest.id.substr(0,6)}</span>
+                                </h3>
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Type</label><p className="font-bold text-slate-800">{selectedRequest.type}</p></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Status</label><span className={`inline-block mt-1 text-xs font-bold px-2 py-1 rounded-full ${selectedRequest.status==='Approved'?'bg-green-100 text-green-700':selectedRequest.status==='Rejected'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}`}>{selectedRequest.status}</span></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Employee</label><p className="font-bold text-slate-800">{selectedRequest.userName}</p></div>
+                                        <div><label className="text-xs font-bold text-slate-400 uppercase">Date</label><p className="font-bold text-slate-800">{new Date(selectedRequest.timestamp?.seconds*1000).toLocaleDateString()}</p></div>
+                                        {selectedRequest.amount && <div><label className="text-xs font-bold text-slate-400 uppercase">Amount</label><p className="font-bold text-slate-800">${selectedRequest.amount}</p></div>}
+                                        {(selectedRequest.from || selectedRequest.to) && <div className="col-span-2"><label className="text-xs font-bold text-slate-400 uppercase">Time</label><p className="font-bold text-slate-800">{selectedRequest.from} - {selectedRequest.to}</p></div>}
+                                    </div>
+                                    <div><label className="text-xs font-bold text-slate-400 uppercase">Reason/Description</label><p className="text-slate-600 bg-slate-50 p-4 rounded-xl mt-1 text-sm">{selectedRequest.reason}</p></div>
+                                    {['HR','Manager','Owner'].includes(user.role) && selectedRequest.status === 'Pending' && (
+                                        <div className="flex gap-4 pt-4 mt-4 border-t">
+                                            <button onClick={()=>{statusUpdate(selectedRequest.id, 'Approved', selectedRequest); setSelectedRequest(null)}} className="flex-1 bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700">Approve</button>
+                                            <button onClick={()=>{statusUpdate(selectedRequest.id, 'Rejected', selectedRequest); setSelectedRequest(null)}} className="flex-1 bg-red-600 text-white py-3 rounded-xl font-bold hover:bg-red-700">Reject</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const Attendance = ({ t, user, onError }) => {
+            const [logs, setLogs] = useState([]);
+            const [status, setStatus] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [dailySummary, setDailySummary] = useState([]);
+            const showToast = useToast();
+            const handleDelete = useGlobalDelete(user);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+
+                // Query depends on role
+                let q;
+                if (user.role === 'Owner') {
+                    // Owner sees all logs for today to build summary, but we fetch latest logs generally
+                    // To show "Today's List", we might need a query for today specifically or just filter locally if dataset small
+                    // For scalability, let's query mostly recent logs or just "all" if assumed small for now.
+                    // Let's use same query as HR for simplicity but we process differently.
+                    q = window.query(window.collection(window.db, "attendance"), window.orderBy("timestamp", "desc"));
+                } else if (user.role === 'HR') {
+                    q = window.query(window.collection(window.db, "attendance"), window.orderBy("timestamp", "desc"));
+                } else {
+                    q = window.query(window.collection(window.db, "attendance"), window.where("userId", "==", user.uid));
+                }
+
+                window.onSnapshot(q, s => {
+                    const data = s.docs.map(d => ({id:d.id, ...d.data()}));
+
+                    if (user.role === 'Owner') {
+                        // Process for Daily Summary
+                        const todayStr = new Date().toDateString();
+                        const todayLogs = data.filter(l => new Date(l.timestamp?.seconds*1000).toDateString() === todayStr);
+
+                        // Group by user
+                        const summary = {};
+                        todayLogs.forEach(l => {
+                            if (!summary[l.userId]) summary[l.userId] = { name: l.userName, in: null, out: null };
+                            if (l.type === 'in' && (!summary[l.userId].in || l.timestamp.seconds < summary[l.userId].in.seconds)) {
+                                summary[l.userId].in = l.timestamp;
+                            }
+                            if (l.type === 'out' && (!summary[l.userId].out || l.timestamp.seconds > summary[l.userId].out.seconds)) {
+                                summary[l.userId].out = l.timestamp;
+                            }
+                        });
+                        setDailySummary(Object.values(summary));
+                        setLogs(data); // Keep full logs if needed or just for table below
+                    } else {
+                        if (user.role !== 'HR') data.sort((a,b)=> (b.timestamp?.seconds||0) - (a.timestamp?.seconds||0));
+                        setLogs(data);
+                        if(data[0] && data[0].type === 'in' && new Date(data[0].timestamp.seconds*1000).toDateString() === new Date().toDateString()) setStatus('Checked In'); else setStatus(null);
+                    }
+                }, (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+            }, [user]);
+
+            const punch = (type) => {
+                setLoading(true);
+                if(!navigator.geolocation) { showToast(t.gpsRequired, "error"); setLoading(false); return; }
+                navigator.geolocation.getCurrentPosition(async (pos) => {
+                    const loc = `${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}`;
+                    await window.addDoc(window.collection(window.db, "attendance"), { userId: user.uid, userName: user.name, type, location: loc, timestamp: window.serverTimestamp() });
+                    showToast("Success", "success"); setLoading(false);
+                }, () => { showToast(t.gpsRequired, "error"); setLoading(false); }, { enableHighAccuracy: true });
+            };
+
+            const isOwner = user.role === 'Owner';
+            // Calculate lateness for display
+            const todayLate = logs.filter(l => l.type === 'in' && new Date(l.timestamp?.seconds*1000).toDateString() === new Date().toDateString())
+                                  .reduce((acc, l) => acc + (window.HRUtils?.calculateLateness(l.timestamp.seconds, user.shiftStart) || 0), 0);
+
+            return (
+                <div className="space-y-6 pb-10 animate-fade-in">
+                    {!isOwner && (
+                        <div className="bg-white rounded-3xl p-10 shadow-sm border border-slate-200 text-center relative overflow-hidden">
+                            <div className="relative z-10">
+                                <div className="text-6xl font-bold text-slate-800 font-mono tracking-tighter mb-4">{new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>
+                                {todayLate > 0 && <div className="inline-block bg-red-100 text-red-600 px-4 py-1 rounded-full font-bold text-sm mb-6 animate-pulse">You are late by {todayLate} minutes</div>}
+                                <div className="flex justify-center">{!status ? <button onClick={()=>punch('in')} disabled={loading} className="px-10 py-4 bg-emerald-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 hover:shadow-2xl hover:bg-emerald-700 transition-all flex items-center gap-3 disabled:opacity-50"><Icon name="log-in" /> {t.checkIn}</button> : <button onClick={()=>punch('out')} disabled={loading} className="px-10 py-4 bg-red-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-red-200 hover:shadow-2xl hover:bg-red-700 transition-all flex items-center gap-3 disabled:opacity-50"><Icon name="log-out" /> {t.checkOut}</button>}</div>
+                            </div>
+                        </div>
+                    )}
+
+                    {isOwner ? (
+                        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                            <div className="p-6 border-b border-slate-100"><h3 className="font-bold text-lg text-slate-800">Today's Attendance ({new Date().toLocaleDateString()})</h3></div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-slate-50 text-slate-500"><tr><th className="p-4">{t.fullName}</th><th className="p-4">Check In</th><th className="p-4">Check Out</th></tr></thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {dailySummary.length > 0 ? dailySummary.map((s, i) => (
+                                            <tr key={i}>
+                                                <td className="p-4 font-bold text-slate-800">{s.name}</td>
+                                                <td className="p-4 font-mono text-emerald-600">{s.in ? new Date(s.in.seconds*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '-'}</td>
+                                                <td className="p-4 font-mono text-red-600">{s.out ? new Date(s.out.seconds*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '-'}</td>
+                                            </tr>
+                                        )) : <tr><td colSpan="3" className="p-6 text-center text-slate-400">No attendance records for today.</td></tr>}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500"><tr><th className="p-4">{t.date}</th><th className="p-4">{t.type}</th><th className="p-4">Time</th><th className="p-4">Loc</th>{['HR','Manager','Owner'].includes(user.role) && <th className="p-4">{t.actions}</th>}</tr></thead><tbody className="divide-y divide-slate-100">{logs.map(l => (<tr key={l.id}><td className="p-4 font-medium">{new Date(l.timestamp?.seconds*1000).toLocaleDateString()}</td><td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${l.type==='in'?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700'}`}>{l.type.toUpperCase()}</span></td><td className="p-4 font-mono">{new Date(l.timestamp?.seconds*1000).toLocaleTimeString()}</td><td className="p-4 text-xs text-slate-400">{l.location}</td>{['HR','Manager','Owner'].includes(user.role) && <td className="p-4"><button onClick={()=>handleDelete("attendance", l.id, `Attendance: ${l.userName} (${l.type})`)} className="text-slate-400 hover:text-red-500"><Icon name="trash-2" size={16}/></button></td>}</tr>))}</tbody></table></div>
+                    )}
+                </div>
+            );
+        };
+
+        const Chat = ({ t, user, onError }) => {
+            const [activeChannel, setActiveChannel] = useState('general');
+            const [messages, setMessages] = useState([]);
+            const [newMessage, setNewMessage] = useState("");
+            const [usersList, setUsersList] = useState([]);
+            // FIX: Add state for mobile chat view toggle
+            const [showMobileChat, setShowMobileChat] = useState(false);
+            const bottomRef = useRef(null);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const unsub = window.onSnapshot(window.collection(window.db, "users"), s => setUsersList(s.docs.map(d => ({id:d.id, ...d.data()})).filter(u => u.uid !== user.uid)), (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+                return () => unsub();
+            }, []);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const q = window.query(window.collection(window.db, "messages"), window.where("channelId", "==", activeChannel));
+                const unsub = window.onSnapshot(q, s => { 
+                    const data = s.docs.map(d => ({id:d.id, ...d.data()}));
+                    data.sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
+                    setMessages(data); 
+                    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100); 
+                }, (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+                return () => unsub();
+            }, [activeChannel]);
+
+            const send = async (e) => {
+                e.preventDefault();
+                if(!newMessage.trim()) return;
+                await window.addDoc(window.collection(window.db, "messages"), { text: newMessage, userId: user.uid, userName: user.name, channelId: activeChannel, timestamp: window.serverTimestamp() });
+                setNewMessage("");
+            };
+
+            const getDmId = (uid1, uid2) => [uid1, uid2].sort().join('_');
+
+            // FIX: Helper to handle channel selection on mobile
+            const handleChannelSelect = (channelId) => {
+                setActiveChannel(channelId);
+                setShowMobileChat(true);
+            };
+
+            return (
+                <div className="flex h-[calc(100vh-140px)] bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden animate-slide-up">
+                    {/* Sidebar: Hidden on mobile when chat is open */}
+                    <div className={`${showMobileChat ? 'hidden' : 'flex'} md:flex w-full md:w-72 bg-slate-50 border-r rtl:border-r-0 rtl:border-l border-slate-200 flex-col`}>
+                        <div className="p-4 border-b border-slate-200"><h3 className="font-bold text-slate-700 mb-3">{t.channels}</h3>
+                            <button onClick={() => handleChannelSelect('general')} className={`w-full text-left px-3 py-2 rounded-lg text-sm mb-1 ${activeChannel === 'general' ? 'bg-primary-100 text-primary-700 font-bold' : 'text-slate-600 hover:bg-slate-200'}`}># {t.generalChannel}</button>
+                            <button onClick={() => handleChannelSelect(`dept_${user.department}`)} className={`w-full text-left px-3 py-2 rounded-lg text-sm ${activeChannel.startsWith('dept_') ? 'bg-primary-100 text-primary-700 font-bold' : 'text-slate-600 hover:bg-slate-200'}`}># {t.deptChannel}</button>
+                        </div>
+                        <div className="p-4 flex-1 overflow-y-auto"><h3 className="font-bold text-slate-700 mb-3">{t.directMessages}</h3>{usersList.map(u => (<button key={u.id} onClick={() => handleChannelSelect(getDmId(user.uid, u.uid))} className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm mb-1 ${activeChannel === getDmId(user.uid, u.uid) ? 'bg-primary-100 text-primary-700 font-bold' : 'text-slate-600 hover:bg-slate-200'}`}><div className="w-6 h-6 rounded-full bg-slate-300 flex items-center justify-center text-[10px] text-white">{u.name?.charAt(0)}</div><span className="truncate">{u.name}</span></button>))}</div>
+                    </div>
+                    
+                    {/* Chat Area: Hidden on mobile when no chat is selected (default state) */}
+                    <div className={`${!showMobileChat ? 'hidden' : 'flex'} md:flex flex-1 flex-col bg-slate-100 relative`}>
+                        <div className="p-4 bg-white border-b border-slate-200 shadow-sm z-10 flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                {/* FIX: Back Button for Mobile */}
+                                <button onClick={() => setShowMobileChat(false)} className="md:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full">
+                                    <Icon name="arrow-left" size={20} className="rtl:rotate-180" />
+                                </button>
+                                <div className="w-10 h-10 bg-primary-100 rounded-full flex items-center justify-center text-primary-600"><Icon name="hash" size={20}/></div>
+                                <h3 className="font-bold text-slate-800">{activeChannel === 'general' ? t.generalChannel : 'Chat'}</h3>
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6 z-10 bg-repeat" style={{backgroundImage: "url('data:image/svg+xml,%3Csvg width=\\'20\\' height=\\'20\\' viewBox=\\'0 0 20 20\\' xmlns=\\'http://www.w3.org/2000/svg\\'%3E%3Cg fill=\\'%239C92AC\\' fill-opacity=\\'0.05\\' fill-rule=\\'evenodd\\'%3E%3Ccircle cx=\\'3\\' cy=\\'3\\' r=\\'3\\'/%3E%3Ccircle cx=\\'13\\' cy=\\'13\\' r=\\'3\\'/%3E%3C/g%3E%3C/svg%3E')"}}>
+                            {messages.map((m, i) => {
+                                const isMe = m.userId === user.uid;
+                                return (
+                                    <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} animate-fade-in`}>
+                                        <div className={`flex items-end gap-2 max-w-[85%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+                                            <div className="w-8 h-8 rounded-full bg-slate-200 border-2 border-white shadow-sm flex items-center justify-center text-xs font-bold text-slate-500 shrink-0">{m.userName?.charAt(0)}</div>
+                                            <div className={`px-5 py-3 rounded-2xl shadow-md ${isMe ? 'bg-primary-600 text-white rounded-br-none' : 'bg-white text-slate-800 rounded-bl-none'}`}>
+                                                {!isMe && <p className="text-[10px] font-bold opacity-50 mb-1 uppercase tracking-wider">{m.userName}</p>}
+                                                <p className="text-sm leading-relaxed">{m.text}</p>
+                                                <p className={`text-[10px] mt-2 text-right ${isMe ? 'text-primary-200' : 'text-slate-400'}`}>{m.timestamp ? new Date(m.timestamp.seconds*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '...'}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                            <div ref={bottomRef}></div>
+                        </div>
+                        <div className="p-4 bg-white border-t border-slate-200 z-10 shadow-lg"><form onSubmit={send} className="flex gap-2"><input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder="Type a message..." className="flex-1 p-3.5 bg-slate-50 border-0 rounded-xl focus:ring-2 focus:ring-primary-100 outline-none transition-all" /><button className="p-3.5 bg-primary-600 text-white rounded-xl shadow-lg shadow-primary-200 hover:scale-105 transition-transform"><Icon name="send" size={20}/></button></form></div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Meetings = ({ t, user, onError }) => {
+            const [meetings, setMeetings] = useState([]);
+            const [showForm, setShowForm] = useState(false);
+            const [users, setUsers] = useState([]);
+            const [newMeeting, setNewMeeting] = useState({ title: '', type: 'online', date: '', time: '', participants: [] });
+            const showToast = useToast();
+            const handleDelete = useGlobalDelete(user);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const q = window.query(window.collection(window.db, "meetings"), window.orderBy("timestamp", "desc"));
+                window.onSnapshot(q, s => setMeetings(s.docs.map(d => ({id:d.id, ...d.data()}))), (e) => { if(e.code === 'permission-denied' && onError) onError(); });
+                window.onSnapshot(window.collection(window.db, "users"), s => setUsers(s.docs.map(d => ({id:d.id, ...d.data()}))));
+            }, []);
+
+            const create = async (e) => {
+                e.preventDefault();
+                const link = newMeeting.type === 'online' ? `https://meet.jit.si/HR_${Date.now()}` : '';
+                await window.addDoc(window.collection(window.db, "meetings"), { ...newMeeting, link, createdBy: user.name, timestamp: window.serverTimestamp() });
+                setShowForm(false); showToast("Meeting Scheduled", "success");
+            };
+
+            const toggleParticipant = (uid) => {
+                setNewMeeting(prev => {
+                    const exists = prev.participants.includes(uid);
+                    return { ...prev, participants: exists ? prev.participants.filter(p => p !== uid) : [...prev.participants, uid] };
+                });
+            };
+
+            return (
+                <div className="space-y-6 animate-slide-up">
+                    <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-slate-800">{t.meetings}</h2>{(['HR','Manager','Owner'].includes(user.role) || user.canCreateMeeting) && <button onClick={()=>setShowForm(true)} className="bg-primary-600 text-white px-4 py-2 rounded-xl flex gap-2 font-bold text-sm"><Icon name="plus" size={18}/> {t.scheduleMeeting}</button>}</div>
+                    {showForm && (<div className="bg-white p-6 rounded-2xl shadow-xl mb-6"><form onSubmit={create} className="space-y-4">
+                        <input className="w-full p-3 border rounded-xl" placeholder={t.meetingTitle} onChange={e=>setNewMeeting({...newMeeting, title:e.target.value})} required />
+                        <div className="flex gap-2"><select className="flex-1 p-3 border rounded-xl" onChange={e=>setNewMeeting({...newMeeting, type:e.target.value})}><option value="online">Online</option><option value="onsite">Onsite</option></select><input type="date" className="flex-1 p-3 border rounded-xl" onChange={e=>setNewMeeting({...newMeeting, date:e.target.value})} required /><input type="time" className="flex-1 p-3 border rounded-xl" onChange={e=>setNewMeeting({...newMeeting, time:e.target.value})} required /></div>
+                        <div className="border p-4 rounded-xl max-h-40 overflow-y-auto">
+                            <p className="font-bold text-sm mb-2 text-slate-500">Select Participants</p>
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center gap-2 text-sm font-bold bg-slate-50 p-2 rounded cursor-pointer"><input type="checkbox" onChange={(e)=>{if(e.target.checked) setNewMeeting(p=>({...p, participants: users.map(u=>u.uid||u.id)})); else setNewMeeting(p=>({...p, participants:[]})) }} /> Select All</label>
+                                {users.map(u => (
+                                    <label key={u.id} className="flex items-center gap-2 text-sm bg-slate-50 p-2 rounded cursor-pointer"><input type="checkbox" checked={newMeeting.participants.includes(u.uid||u.id)} onChange={()=>toggleParticipant(u.uid||u.id)} /> {u.name}</label>
+                                ))}
+                            </div>
+                        </div>
+                        <button className="w-full p-3 bg-primary-600 text-white rounded-xl font-bold">{t.create}</button></form></div>)}
+                    <div className="grid gap-4">{meetings.map(m => (<div key={m.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4"><div className="flex items-center gap-4"><div className="w-12 h-12 bg-primary-100 text-primary-600 rounded-xl flex items-center justify-center"><Icon name="video" size={24}/></div><div><h3 className="font-bold text-lg">{m.title}</h3><p className="text-sm text-slate-500">{m.date} at {m.time}</p><div className="flex -space-x-2 mt-2">{m.participants?.slice(0,5).map(uid => { const u = users.find(user=>user.uid===uid||user.id===uid); return u ? <div key={uid} className="w-6 h-6 rounded-full bg-slate-200 border-2 border-white text-[8px] flex items-center justify-center">{u.name.charAt(0)}</div> : null; })} {m.participants?.length > 5 && <span className="w-6 h-6 rounded-full bg-slate-100 border-2 border-white text-[8px] flex items-center justify-center">+{m.participants.length-5}</span>}</div></div></div><div className="flex items-center gap-3">{m.link && <a href={m.link} target="_blank" rel="noopener noreferrer" className="bg-primary-50 text-primary-600 px-4 py-2 rounded-lg font-bold text-sm">Join</a>}{['HR','Manager','Owner'].includes(user.role) && <button onClick={()=>handleDelete("meetings", m.id, `Meeting: ${m.title}`)} className="p-2 text-slate-300 hover:text-red-500"><Icon name="trash-2" size={16}/></button>}</div></div>))}</div>
+                </div>
+            );
+        };
+
+        const Reports = ({ t, user }) => {
+            const isEmployee = !['HR', 'Manager', 'Owner'].includes(user.role);
+            const [filters, setFilters] = useState({
+                type: 'attendance',
+                startDate: new Date().toISOString().split('T')[0],
+                endDate: new Date().toISOString().split('T')[0],
+                department: 'All',
+                employeeId: isEmployee ? user.uid : 'All'
+            });
+            const [data, setData] = useState([]);
+            const [stats, setStats] = useState({});
+            const [users, setUsers] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [departments, setDepartments] = useState([]);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const unsub = window.onSnapshot(window.collection(window.db, "users"), s => {
+                    const u = s.docs.map(d => ({id:d.id, ...d.data()}));
+                    setUsers(u); setDepartments([...new Set(u.map(user => user.department).filter(Boolean))]);
+                });
+                return () => unsub();
+            }, []);
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                const fetchReport = async () => {
+                    setLoading(true);
+                    try {
+                        let result = [];
+                        const start = new Date(filters.startDate); start.setHours(0,0,0,0);
+                        const end = new Date(filters.endDate); end.setHours(23,59,59,999);
+
+                        // If Employee, force filtering by their ID
+                        const targetUid = isEmployee ? user.uid : (filters.employeeId === 'All' ? null : filters.employeeId);
+
+                        if (filters.type === 'attendance' || filters.type === 'lateness_details') {
+                            let q = window.collection(window.db, "attendance");
+                            if (targetUid) q = window.query(q, window.where("userId", "==", targetUid));
+                            const snap = await window.getDocs(q);
+                            result = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(item => { const date = item.timestamp ? new Date(item.timestamp.seconds * 1000) : null; return date && date >= start && date <= end; }).map(item => { const u = users.find(x => x.uid === item.userId || x.id === item.userId); return { ...item, userName: u?.name || item.userName, department: u?.department, shiftStart: u?.shiftStart }; });
+                        }
+                        else if (filters.type === 'requests' || filters.type === 'leave_summary') {
+                            let q = window.collection(window.db, "requests");
+                            if (targetUid) q = window.query(q, window.where("userId", "==", targetUid));
+                            const snap = await window.getDocs(q);
+                            result = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(item => { const date = item.timestamp ? new Date(item.timestamp.seconds * 1000) : null; return date && date >= start && date <= end; }).map(item => { const u = users.find(x => x.uid === item.userId || x.id === item.userId); return { ...item, department: u?.department }; });
+
+                            if (filters.type === 'leave_summary') {
+                                setStats({
+                                    total: result.length,
+                                    approved: result.filter(r=>r.status==='Approved').length,
+                                    rejected: result.filter(r=>r.status==='Rejected').length,
+                                    pending: result.filter(r=>r.status==='Pending').length
+                                });
+                            }
+                        }
+                        else if (filters.type === 'employees') { result = users; }
+                        else if (filters.type === 'financials') {
+                             const attSnap = await window.getDocs(window.query(window.collection(window.db, "attendance")));
+                             const allAttendance = attSnap.docs.map(d => ({...d.data()}));
+                             const dedSnap = await window.getDocs(window.query(window.collection(window.db, "deductions")));
+                             const allDeductions = dedSnap.docs.map(d => ({...d.data()}));
+                             // Load Settings
+                             const settingsSnap = await window.getDoc(window.doc(window.db, "settings", "global"));
+                             const settings = settingsSnap.exists() ? settingsSnap.data() : {};
+
+                             const targets = targetUid ? users.filter(u=>u.uid===targetUid || u.id===targetUid) : users;
+
+                             result = targets.map(u => {
+                                 const userLogs = allAttendance.filter(l => (l.userId === u.uid || l.userId === u.id) && l.timestamp && new Date(l.timestamp.seconds*1000) >= start && new Date(l.timestamp.seconds*1000) <= end);
+                                 const userDeds = allDeductions.filter(d => (d.userId === u.uid || d.userId === u.id) && d.date && new Date(d.date) >= start && new Date(d.date) <= end);
+                                 const financials = window.HRUtils ? window.HRUtils.calculateFinancials(u, userLogs, userDeds, settings) : {};
+                                 return { ...u, ...financials };
+                             });
+                        }
+
+                        if (!targetUid && filters.department !== 'All') result = result.filter(item => item.department === filters.department);
+                        
+                        setData(result);
+                    } catch (e) { } finally { setLoading(false); }
+                };
+                const timer = setTimeout(fetchReport, 500);
+                return () => clearTimeout(timer);
+            }, [filters, users, isEmployee]);
+
+            const print = () => window.print();
+
+            return (
+                <div className="space-y-6 animate-fade-in pb-10">
+                    <div className="flex justify-between items-center no-print"><h2 className="text-2xl font-bold text-slate-800">{t.reports}</h2><button onClick={print} className="bg-slate-800 text-white px-4 py-2 rounded-xl flex gap-2 font-bold text-sm shadow-lg hover:bg-slate-700 transition-colors"><Icon name="printer" size={18}/> {t.printReport}</button></div>
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 no-print">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                            <div><label className="text-xs font-bold text-slate-500 uppercase block mb-1">{t.reportType}</label><select className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold outline-none focus:border-primary-500" value={filters.type} onChange={e=>setFilters({...filters, type:e.target.value})}>
+                                <option value="attendance">{t.attendanceReport}</option>
+                                <option value="requests">{t.requests}</option>
+                                {!isEmployee && <option value="employees">{t.employees}</option>}
+                                <option value="financials">Financials / Salary Slip</option>
+                                {isEmployee && <option value="lateness_details">Lateness Details</option>}
+                                {isEmployee && <option value="leave_summary">Leave Summary</option>}
+                            </select></div>
+                            {filters.type !== 'employees' && (<><div><label className="text-xs font-bold text-slate-500 uppercase block mb-1">{t.from}</label><input type="date" className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold outline-none focus:border-primary-500" value={filters.startDate} onChange={e=>setFilters({...filters, startDate:e.target.value})} /></div><div><label className="text-xs font-bold text-slate-500 uppercase block mb-1">{t.to}</label><input type="date" className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold outline-none focus:border-primary-500" value={filters.endDate} onChange={e=>setFilters({...filters, endDate:e.target.value})} /></div></>)}
+                            {!isEmployee && (<div><label className="text-xs font-bold text-slate-500 uppercase block mb-1">{t.filterByDept}</label><select className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold outline-none focus:border-primary-500" value={filters.department} onChange={e=>setFilters({...filters, department:e.target.value})}><option value="All">{t.allDepts}</option>{departments.map(d=><option key={d} value={d}>{d}</option>)}</select></div>)}
+                            {!isEmployee && (<div><label className="text-xs font-bold text-slate-500 uppercase block mb-1">Employee</label><select className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold outline-none focus:border-primary-500" value={filters.employeeId} onChange={e=>setFilters({...filters, employeeId:e.target.value})}><option value="All">All Employees</option>{users.map(u=><option key={u.id} value={u.uid || u.id}>{u.name}</option>)}</select></div>)}
+                        </div>
+                    </div>
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden print-container">
+                        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                            <div className="flex items-center gap-4">
+                                {COMPANY_LOGO && <img src={COMPANY_LOGO} alt="Logo" className="h-12 object-contain mix-blend-multiply" />}
+                                <div><h3 className="font-bold text-lg text-slate-800 capitalize">{filters.type} Report</h3><p className="text-xs text-slate-500">{filters.type !== 'employees' ? `${filters.startDate} to ${filters.endDate}` : `Generated on ${new Date().toLocaleDateString()}`}</p></div>
+                            </div>
+                            <div className="text-right"><p className="text-xs text-slate-400 font-bold uppercase">Total Records</p><p className="text-2xl font-bold text-slate-700">{data.length}</p></div>
+                        </div>
+                        {loading ? <div className="p-10 text-center text-slate-400">Loading data...</div> : (
+                            <div className="overflow-x-auto">
+                                {filters.type === 'leave_summary' ? (
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-6">
+                                        <div className="bg-slate-50 p-4 rounded-xl text-center"><p className="text-xs font-bold text-slate-400">Total Requests</p><p className="text-3xl font-bold text-slate-800">{stats.total}</p></div>
+                                        <div className="bg-green-50 p-4 rounded-xl text-center"><p className="text-xs font-bold text-green-600">Approved</p><p className="text-3xl font-bold text-green-700">{stats.approved}</p></div>
+                                        <div className="bg-red-50 p-4 rounded-xl text-center"><p className="text-xs font-bold text-red-600">Rejected</p><p className="text-3xl font-bold text-red-700">{stats.rejected}</p></div>
+                                        <div className="bg-yellow-50 p-4 rounded-xl text-center"><p className="text-xs font-bold text-yellow-600">Pending</p><p className="text-3xl font-bold text-yellow-700">{stats.pending}</p></div>
+                                    </div>
+                                ) : (
+                                <table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500 uppercase text-xs font-bold"><tr>
+                                    {filters.type === 'attendance' && <><th className="p-4">{t.date}</th><th className="p-4">{t.fullName}</th><th className="p-4">{t.type}</th><th className="p-4">Time</th><th className="p-4">Late</th><th className="p-4">Dept</th></>}
+                                    {filters.type === 'lateness_details' && <><th className="p-4">{t.date}</th><th className="p-4">Shift Start</th><th className="p-4">Arrival Time</th><th className="p-4">Late Minutes</th><th className="p-4">Status</th></>}
+                                    {filters.type === 'requests' && <><th className="p-4">{t.date}</th><th className="p-4">{t.fullName}</th><th className="p-4">{t.type}</th><th className="p-4">{t.reason}</th><th className="p-4">{t.status}</th><th className="p-4">Dept</th></>}
+                                    {filters.type === 'employees' && <><th className="p-4">{t.fullName}</th><th className="p-4">{t.role}</th><th className="p-4">{t.department}</th><th className="p-4">{t.email}</th><th className="p-4">{t.status}</th></>}
+                                    {filters.type === 'financials' && <><th className="p-4">{t.fullName}</th><th className="p-4">{t.salary}</th><th className="p-4">Net Salary</th><th className="p-4">Deductions</th><th className="p-4">Late Cost</th></>}
+                                </tr></thead><tbody className="divide-y divide-slate-100">{data.map((item, i) => (<tr key={item.id || i} className="hover:bg-slate-50/50 transition-colors">
+                                        {filters.type === 'attendance' && <><td className="p-4 font-medium text-slate-700">{new Date(item.timestamp.seconds*1000).toLocaleDateString()}</td><td className="p-4 font-bold text-slate-800">{item.userName}</td><td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${item.type==='in'?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700'}`}>{item.type.toUpperCase()}</span></td><td className="p-4 font-mono text-slate-600">{new Date(item.timestamp.seconds*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td><td className="p-4 font-bold text-red-500">{item.type === 'in' && window.HRUtils ? `+${window.HRUtils.calculateLateness(item.timestamp.seconds, users.find(u=>u.uid===item.userId)?.shiftStart)}m` : '-'}</td><td className="p-4 text-slate-500">{item.department}</td></>}
+                                        {filters.type === 'lateness_details' && item.type === 'in' && <><td className="p-4 font-medium">{new Date(item.timestamp.seconds*1000).toLocaleDateString()}</td><td className="p-4 font-mono">{item.shiftStart || "09:00"}</td><td className="p-4 font-mono">{new Date(item.timestamp.seconds*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td><td className="p-4 font-bold text-red-600">{window.HRUtils?.calculateLateness(item.timestamp.seconds, item.shiftStart)}m</td><td className="p-4"><span className="bg-red-50 text-red-600 px-2 py-1 rounded text-xs font-bold">LATE</span></td></>}
+                                        {filters.type === 'requests' && <><td className="p-4 font-medium text-slate-700">{new Date(item.timestamp.seconds*1000).toLocaleDateString()}</td><td className="p-4 font-bold text-slate-800">{item.userName}</td><td className="p-4"><span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">{item.type}</span></td><td className="p-4 text-slate-600 max-w-[200px] truncate">{item.reason}</td><td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${item.status==='Approved'?'bg-green-50 text-green-700':item.status==='Rejected'?'bg-red-50 text-red-700':'bg-yellow-50 text-yellow-700'}`}>{item.status}</span></td><td className="p-4 text-slate-500">{item.department}</td></>}
+                                        {filters.type === 'employees' && <><td className="p-4 font-bold text-slate-800">{item.name}</td><td className="p-4 text-slate-600">{item.position || item.role}</td><td className="p-4 text-slate-600">{item.department}</td><td className="p-4 text-slate-500 text-sm">{item.email}</td><td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${item.status==='active'?'bg-green-50 text-green-700':'bg-yellow-50 text-yellow-700'}`}>{item.status}</span></td></>}
+                                        {filters.type === 'financials' && <><td className="p-4 font-bold text-slate-800">{item.name}</td><td className="p-4 font-mono text-slate-600">${Number(item.salary).toLocaleString()}</td><td className="p-4 font-mono font-bold text-emerald-600">${Number(item.netSalary).toLocaleString()}</td><td className="p-4 font-mono text-red-500">-${item.totalDeductions}</td><td className="p-4 font-mono text-orange-500">-${item.lateCost}</td></>}
+                                    </tr>))}</tbody></table>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const Settings = ({ t, user }) => {
+            const [config, setConfig] = useState({
+                latenessRule: 'salary', // 'salary', 'grace30', 'hours8', 'allowance60'
+                workHours: 8,
+                gracePeriod: 15
+            });
+            const showToast = useToast();
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) return;
+                window.getDoc(window.doc(window.db, "settings", "global")).then(s => {
+                    if(s.exists()) setConfig(s.data());
+                });
+            }, []);
+
+            const save = async () => {
+                await window.setDoc(window.doc(window.db, "settings", "global"), config);
+                showToast("Settings Saved", "success");
+            };
+
+            if(user.role !== 'Owner' && user.role !== 'Manager') return <div className="p-10 text-center text-slate-400">Access Denied</div>;
+
+            return (
+                <div className="space-y-6 animate-fade-in pb-10">
+                    <h2 className="text-2xl font-bold text-slate-800">System Settings</h2>
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                        <h3 className="font-bold text-lg mb-4">Attendance & Lateness Rules</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">Calculation Method</label>
+                                <select className="w-full p-3 border rounded-xl" value={config.latenessRule} onChange={e=>setConfig({...config, latenessRule:e.target.value})}>
+                                    <option value="salary">Deduct from Salary (Minute Cost)</option>
+                                    <option value="grace30">30 Minutes Grace Period</option>
+                                    <option value="hours8">Based on 8 Work Hours</option>
+                                    <option value="allowance60">60 Minutes Monthly Allowance</option>
+                                </select>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="text-xs font-bold text-slate-500 uppercase">Daily Work Hours</label><input type="number" className="w-full p-3 border rounded-xl" value={config.workHours} onChange={e=>setConfig({...config, workHours:Number(e.target.value)})} /></div>
+                                <div><label className="text-xs font-bold text-slate-500 uppercase">Grace Period (Min)</label><input type="number" className="w-full p-3 border rounded-xl" value={config.gracePeriod} onChange={e=>setConfig({...config, gracePeriod:Number(e.target.value)})} /></div>
+                            </div>
+                            <div className="pt-4 border-t flex justify-end">
+                                <button onClick={save} className="bg-slate-900 text-white px-6 py-3 rounded-xl font-bold hover:bg-slate-800">Save Changes</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [view, setView] = useState('dashboard');
+            const [lang, setLang] = useState('en');
+            const [sidebarOpen, setSidebarOpen] = useState(false);
+            const [loadingAuth, setLoadingAuth] = useState(true);
+            const [permError, setPermError] = useState(false);
+            const [globalRequests, setGlobalRequests] = useState([]);
+            const [allUsers, setAllUsers] = useState([]);
+            const [settings, setSettings] = useState({});
+            
+            const t = TRANSLATIONS[lang];
+
+            useEffect(() => {
+                if(!window.firebaseLoaded) { setLoadingAuth(false); return; }
+                const unsub = window.onAuthStateChanged(window.auth, (u) => {
+                    if (u) {
+                        window.onSnapshot(window.doc(window.db, "users", u.uid), (doc) => {
+                            if (doc.exists()) setUser({ ...u, ...doc.data() });
+                            // else { window.signOut(window.auth); setUser(null); } // Removed to prevent race condition during registration
+                            setLoadingAuth(false);
+                        }, (e) => { if(e.code==='permission-denied') setPermError(true); setLoadingAuth(false); });
+                        
+                        window.onSnapshot(window.collection(window.db, "requests"), 
+                            s => setGlobalRequests(s.docs.map(d=>d.data())), 
+                            (e) => { if(e.code==='permission-denied') setPermError(true); }
+                        );
+                        window.onSnapshot(window.collection(window.db, "users"), 
+                            s => setAllUsers(s.docs.map(d=>d.data())),
+                            (e) => { if(e.code==='permission-denied') setPermError(true); }
+                        );
+                        // Load Settings
+                        window.onSnapshot(window.doc(window.db, "settings", "global"), s => {
+                            if(s.exists()) setSettings(s.data());
+                        });
+                    } else { setUser(null); setLoadingAuth(false); }
+                });
+                return () => unsub();
+            }, []);
+
+            if (loadingAuth) return <div className="h-screen flex items-center justify-center text-slate-400 animate-pulse">Loading System...</div>;
+            if (!user) return <ToastProvider><div dir={lang==='ar'?'rtl':'ltr'} className={lang==='ar'?'font-arabic':''}><AuthScreen t={t} onLogin={setUser} onError={()=>setPermError(true)} /></div></ToastProvider>;
+            if (user.status === 'pending') return <PendingScreen t={t} onLogout={() => window.signOut(window.auth)} />;
+
+            const menu = [
+                { id: 'dashboard', icon: 'layout-grid', label: t.dashboard },
+                { id: 'profile', icon: 'user', label: t.viewProfile },
+                { id: 'attendance', icon: 'clock', label: t.attendance },
+                { id: 'requests', icon: 'file-text', label: t.requests },
+                { id: 'tasks', icon: 'check-square', label: t.tasks },
+                { id: 'chat', icon: 'message-circle', label: t.chat },
+                { id: 'meetings', icon: 'video', label: t.meetings },
+            ];
+            if(['HR','Manager','Owner'].includes(user.role)) {
+                menu.push({ id: 'employees', icon: 'users', label: t.employees });
+                menu.push({ id: 'reports', icon: 'bar-chart-2', label: t.reports });
+                menu.push({ id: 'settings', icon: 'settings', label: "Settings" });
+            } else {
+                // Permissions for Employee
+                if(user.canViewEmployees) menu.push({ id: 'employees', icon: 'users', label: t.employees });
+                if(user.canViewReports) menu.push({ id: 'reports', icon: 'bar-chart-2', label: t.reports });
+            }
+
+            return (
+                <ToastProvider>
+                    {permError && <PermissionHelpModal onClose={()=>setPermError(false)} />}
+                    <div dir={lang==='ar'?'rtl':'ltr'} className={`flex h-full ${lang==='ar'?'font-arabic':''}`}>
+                        {/* Mobile Sidebar Overlay */}
+                        {sidebarOpen && <div className="fixed inset-0 bg-black/50 z-20 md:hidden" onClick={() => setSidebarOpen(false)}></div>}
+                        <div className={`no-print fixed md:static inset-y-0 z-30 w-72 bg-slate-900 text-white transform transition-transform duration-300 ${sidebarOpen ? 'translate-x-0' : (lang==='ar'?'translate-x-full':'-translate-x-full')} md:translate-x-0 flex flex-col shadow-2xl`}>
+                            <div className="p-8 flex items-center justify-between"><h1 className="text-xl font-bold flex gap-3 items-center"><span className="bg-primary-600 p-1.5 rounded-lg"><Icon name="hexagon" className="text-white"/></span> {t.appName}</h1><button onClick={()=>setSidebarOpen(false)} className="md:hidden text-slate-400"><Icon name="x"/></button></div>
+                            <div className="px-6 mb-6"><div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 flex items-center gap-3"><div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-500 to-purple-600 flex items-center justify-center font-bold text-sm">{user.name?.charAt(0)}</div><div className="overflow-hidden"><p className="font-bold text-sm truncate">{user.name}</p><p className="text-[10px] text-slate-400 uppercase tracking-wider">{t.roles[user.role.toLowerCase()]}</p></div></div></div>
+                            <nav className="flex-1 px-4 space-y-1 overflow-y-auto">{menu.map(m => (<button key={m.id} onClick={()=>{setView(m.id); setSidebarOpen(false)}} className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl transition-all group ${view===m.id ? 'bg-primary-600 text-white shadow-lg font-medium' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}><Icon name={m.icon} size={20} className={view===m.id?'text-white':'text-slate-500 group-hover:text-white'} /><span>{m.label}</span></button>))}</nav>
+                            <div className="p-4"><button onClick={()=>window.signOut(window.auth)} className="w-full py-3 bg-slate-800 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-900/20 transition-all flex items-center justify-center gap-2 font-medium text-sm"><Icon name="log-out" size={16}/> Logout</button></div>
+                        </div>
+                        <div className="flex-1 flex flex-col overflow-hidden relative bg-slate-50/50">
+                            <header className="no-print h-20 bg-white/80 backdrop-blur border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-20"><div className="flex items-center gap-4"><button onClick={()=>setSidebarOpen(true)} className="md:hidden text-slate-500"><Icon name="menu"/></button><h2 className="text-xl font-bold text-slate-800">{menu.find(m=>m.id===view)?.label || t.dashboard}</h2></div><button onClick={()=>setLang(l=>l==='en'?'ar':'en')} className="px-4 py-2 border border-slate-200 rounded-full text-xs font-bold hover:bg-slate-50 transition-colors uppercase">{lang}</button></header>
+                            <main className="flex-1 overflow-auto p-4 md:p-10">
+                                {view === 'dashboard' && <Dashboard t={t} user={user} setView={setView} requests={globalRequests} users={allUsers} />}
+                                {view === 'profile' && <EmployeeProfile t={t} employee={user} isHR={['HR','Manager','Owner'].includes(user.role)} onBack={()=>setView('dashboard')} onError={()=>setPermError(true)} />}
+                                {view === 'attendance' && <Attendance t={t} user={user} onError={()=>setPermError(true)} />}
+                                {view === 'employees' && <Employees t={t} user={user} onError={()=>setPermError(true)} />}
+                                {view === 'requests' && <Requests t={t} user={user} users={allUsers} onError={()=>setPermError(true)} />}
+                                {view === 'tasks' && <Tasks t={t} user={user} users={allUsers} onError={()=>setPermError(true)} />}
+                                {view === 'chat' && <Chat t={t} user={user} onError={()=>setPermError(true)} />}
+                                {view === 'meetings' && <Meetings t={t} user={user} onError={()=>setPermError(true)} />}
+                                {view === 'reports' && <Reports t={t} user={user} />}
+                                {view === 'settings' && <Settings t={t} user={user} />}
+                            </main>
+                        </div>
+                    </div>
+                </ToastProvider>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
